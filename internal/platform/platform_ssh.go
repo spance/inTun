@@ -74,6 +74,7 @@ func (c *SSHConnection) Ping() time.Duration {
 	c.mu.RLock()
 	if c.exited || c.client == nil {
 		c.mu.RUnlock()
+		log.Printf("[SSH] Ping: connection not ready (exited=%v, client=%v)", c.exited, c.client == nil)
 		return 0
 	}
 	client := c.client
@@ -82,6 +83,7 @@ func (c *SSHConnection) Ping() time.Duration {
 	start := time.Now()
 	_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
 	if err != nil {
+		log.Printf("[SSH] Ping failed after %v: %v", time.Since(start), err)
 		return 0
 	}
 	return time.Since(start)

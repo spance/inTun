@@ -211,17 +211,9 @@ func (t *Tunnel) UpdateStats(uploadBytes, downloadBytes, uploadSpeed, downloadSp
 	t.UploadSpeed = uploadSpeed
 	t.DownloadSpeed = downloadSpeed
 
-	if shouldPing {
-		if latency == 0 && t.Status == StatusRunning {
-			t.PingFailCount++
-			if t.PingFailCount >= 3 {
-				t.Status = StatusError
-				t.Error = "connection lost (ping timeout)"
-			}
-		} else if latency > 0 {
-			t.PingFailCount = 0
-			t.Latency = latency
-		}
+	if shouldPing && latency > 0 {
+		t.PingFailCount = 0
+		t.Latency = latency
 	}
 }
 

@@ -201,21 +201,28 @@ func TestTunnelUpdateStats(t *testing.T) {
 	}
 }
 
-func TestTunnelPingFailDetection(t *testing.T) {
+func TestTunnelCheckStatusDetectsConnectionFailure(t *testing.T) {
+	mockConn := platform.NewMockConnection()
 	tun := &Tunnel{
 		ID:     1,
 		Status: StatusRunning,
+		Conn:   mockConn,
 	}
 
-	for i := 0; i < 3; i++ {
-		tun.UpdateStats(0, 0, 0, 0, 0, true)
+	tun.CheckStatus()
+	if tun.Status != StatusRunning {
+		t.Errorf("Status should remain Running when connection is running")
 	}
+
+	mockConn.SetError("SSH_KEEPALIVE_FAILED: connection reset")
+
+	tun.CheckStatus()
 
 	if tun.Status != StatusError {
-		t.Errorf("Status = %v after 3 ping failures, want %v", tun.Status, StatusError)
+		t.Errorf("Status = %v after connection error, want %v", tun.Status, StatusError)
 	}
-	if tun.Error != "connection lost (ping timeout)" {
-		t.Errorf("Error = %q, want %q", tun.Error, "connection lost (ping timeout)")
+	if tun.Error == "" {
+		t.Error("Error should be set")
 	}
 }
 

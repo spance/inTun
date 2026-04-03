@@ -71,7 +71,7 @@ func TestMonitorUpdatesStats(t *testing.T) {
 	}
 }
 
-func TestMonitorPingDetection(t *testing.T) {
+func TestMonitorDetectsConnectionFailure(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	mockConn := platform.NewMockConnection()
 	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tt platform.TunnelType, local, remote string) (*platform.MockConnection, error) {
@@ -84,22 +84,23 @@ func TestMonitorPingDetection(t *testing.T) {
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	tun, _ := m.Create("test", cfg, tunnel.Local, "8080", "80")
 
-	mockConn.SetPing(0)
-
 	mon := NewMonitor(m, 20*time.Millisecond)
 	mon.Start()
 
-	for i := 0; i < pingIntervalMultiplier*3+2; i++ {
-		time.Sleep(25 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+
+	if tun.GetStatus() != tunnel.StatusRunning {
+		t.Errorf("Status should remain Running when connection is healthy")
 	}
+
+	mockConn.SetError("SSH_KEEPALIVE_FAILED: connection reset")
+
+	time.Sleep(60 * time.Millisecond)
 
 	mon.Stop()
 
 	if tun.GetStatus() != tunnel.StatusError {
-		t.Errorf("Status = %v, want Error after ping failures", tun.GetStatus())
-	}
-	if tun.GetError() != "connection lost (ping timeout)" {
-		t.Errorf("Error = %q, want 'connection lost (ping timeout)'", tun.GetError())
+		t.Errorf("Status = %v after connection failure, want Error", tun.GetStatus())
 	}
 }
 
