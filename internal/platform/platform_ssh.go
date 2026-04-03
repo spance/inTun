@@ -26,11 +26,15 @@ type SSHConnection struct {
 	totalDownload atomic.Int64
 	knownHosts    *KnownHosts
 	authCtx       *AuthContext
+	keepaliveStop chan struct{}
 }
 
 func (c *SSHConnection) Stop() error {
 	var err error
 	c.stopOnce.Do(func() {
+		if c.keepaliveStop != nil {
+			close(c.keepaliveStop)
+		}
 		for _, f := range c.forwards {
 			f.Close()
 		}
@@ -80,6 +84,32 @@ func (c *SSHConnection) Ping() time.Duration {
 		return 0
 	}
 	return time.Since(start)
+}
+
+func (c *SSHConnection) sendKeepalive() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.keepaliveStop:
+			return
+		case <-ticker.C:
+			c.mu.RLock()
+			if c.exited || c.client == nil {
+				c.mu.RUnlock()
+				return
+			}
+			client := c.client
+			c.mu.RUnlock()
+
+			_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
+			if err != nil {
+				c.setError("SSH_KEEPALIVE_FAILED: " + err.Error())
+				return
+			}
+		}
+	}
 }
 
 func (c *SSHConnection) setExited() {
@@ -158,12 +188,27 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 	sshConfig.Auth = authMethods
 
 	addr := cfg.Host + ":" + cfg.Port
-	client, err := ssh.Dial("tcp", addr, sshConfig)
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	netConn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		conn.setError(fmt.Sprintf("SSH_CONNECTION_FAILED:%s: %v", cfg.Host, err))
 		return
 	}
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, sshConfig)
+	if err != nil {
+		netConn.Close()
+		conn.setError(fmt.Sprintf("SSH_CONNECTION_FAILED:%s: %v", cfg.Host, err))
+		return
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
 	conn.client = client
+	conn.keepaliveStop = make(chan struct{})
+
+	go conn.sendKeepalive()
 
 	switch tunnelType {
 	case Local:
