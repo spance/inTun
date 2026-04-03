@@ -74,7 +74,6 @@ func (c *SSHConnection) Ping() time.Duration {
 	c.mu.RLock()
 	if c.exited || c.client == nil {
 		c.mu.RUnlock()
-		log.Printf("[SSH] Ping: connection not ready (exited=%v, client=%v)", c.exited, c.client == nil)
 		return 0
 	}
 	client := c.client
@@ -83,7 +82,6 @@ func (c *SSHConnection) Ping() time.Duration {
 	start := time.Now()
 	_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
 	if err != nil {
-		log.Printf("[SSH] Ping failed after %v: %v", time.Since(start), err)
 		return 0
 	}
 	return time.Since(start)
@@ -93,34 +91,24 @@ func (c *SSHConnection) sendKeepalive() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	keepaliveCount := 0
 	for {
 		select {
 		case <-c.keepaliveStop:
-			log.Printf("[SSH] Keepalive goroutine stopped")
 			return
 		case <-ticker.C:
 			c.mu.RLock()
 			if c.exited || c.client == nil {
 				c.mu.RUnlock()
-				log.Printf("[SSH] Keepalive stopping: exited=%v, client=%v", c.exited, c.client == nil)
 				return
 			}
 			client := c.client
 			c.mu.RUnlock()
 
-			start := time.Now()
 			_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
-			keepaliveCount++
-
 			if err != nil {
-				log.Printf("[SSH] Keepalive #%d failed after %v: %v", keepaliveCount, time.Since(start), err)
+				log.Printf("[SSH] Keepalive failed: %v", err)
 				c.setError("SSH_KEEPALIVE_FAILED: " + err.Error())
 				return
-			}
-
-			if keepaliveCount%6 == 0 {
-				log.Printf("[SSH] Keepalive #%d OK (latency: %v)", keepaliveCount, time.Since(start))
 			}
 		}
 	}
@@ -234,8 +222,6 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 	conn.client = client
 	conn.keepaliveStop = make(chan struct{})
 
-	log.Printf("[SSH] Connected to %s@%s:%s (tunnel: %s)", cfg.User, cfg.Host, cfg.Port, tunnelType)
-
 	go conn.sendKeepalive()
 
 	switch tunnelType {
@@ -250,10 +236,8 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 	go func() {
 		err := client.Wait()
 		if err != nil {
-			log.Printf("[SSH] Connection closed for %s@%s:%s - Error: %v", cfg.User, cfg.Host, cfg.Port, err)
+			log.Printf("[SSH] Connection closed: %s@%s:%s - %v", cfg.User, cfg.Host, cfg.Port, err)
 			conn.setError("SSH_CONNECTION_LOST: " + err.Error())
-		} else {
-			log.Printf("[SSH] Connection closed normally for %s@%s:%s", cfg.User, cfg.Host, cfg.Port)
 		}
 		conn.setExited()
 	}()
@@ -393,13 +377,11 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 		return
 	}
 	conn.forwards = append(conn.forwards, listener)
-	log.Printf("[SSH] Local forward listening on 127.0.0.1:%s -> 127.0.0.1:%s", localPort, remotePort)
 
 	go func() {
 		for {
 			localConn, err := listener.Accept()
 			if err != nil {
-				log.Printf("[SSH] Local forward listener closed: %v", err)
 				return
 			}
 			go conn.handleLocalForward(localConn, remotePort)
@@ -417,13 +399,11 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localPort, remoteP
 		return
 	}
 	conn.forwards = append(conn.forwards, listener)
-	log.Printf("[SSH] Remote forward listening on remote 127.0.0.1:%s -> local 127.0.0.1:%s", remotePort, localPort)
 
 	go func() {
 		for {
 			remoteConn, err := listener.Accept()
 			if err != nil {
-				log.Printf("[SSH] Remote forward listener closed: %v", err)
 				return
 			}
 			go conn.handleRemoteForward(remoteConn, localPort)
@@ -441,13 +421,11 @@ func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string)
 		return
 	}
 	conn.forwards = append(conn.forwards, listener)
-	log.Printf("[SSH] Dynamic SOCKS5 proxy listening on 127.0.0.1:%s", localPort)
 
 	go func() {
 		for {
 			localConn, err := listener.Accept()
 			if err != nil {
-				log.Printf("[SSH] Dynamic forward listener closed: %v", err)
 				return
 			}
 			go conn.handleDynamicForward(localConn)
@@ -489,13 +467,11 @@ func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string
 	c.mu.RUnlock()
 
 	if exited || client == nil {
-		log.Printf("[SSH] Local forward: connection closed")
 		return
 	}
 
 	remoteConn, err := client.Dial("tcp", "127.0.0.1:"+remotePort)
 	if err != nil {
-		log.Printf("[SSH] Local forward: failed to dial remote 127.0.0.1:%s: %v", remotePort, err)
 		return
 	}
 	defer remoteConn.Close()
@@ -519,7 +495,6 @@ func (c *SSHConnection) handleRemoteForward(remoteConn net.Conn, localPort strin
 
 	localConn, err := net.Dial("tcp", "127.0.0.1:"+localPort)
 	if err != nil {
-		log.Printf("[SSH] Remote forward: failed to dial local 127.0.0.1:%s: %v", localPort, err)
 		return
 	}
 	defer localConn.Close()
@@ -544,12 +519,10 @@ func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
 	buf := make([]byte, 262)
 	n, err := localConn.Read(buf)
 	if err != nil || n < 3 {
-		log.Printf("[SSH] Dynamic forward: failed to read SOCKS greeting: %v", err)
 		return
 	}
 
 	if buf[0] != 0x05 {
-		log.Printf("[SSH] Dynamic forward: not SOCKS5, got version %d", buf[0])
 		return
 	}
 
@@ -558,12 +531,10 @@ func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
 	buf = make([]byte, 262)
 	n, err = localConn.Read(buf)
 	if err != nil || n < 10 {
-		log.Printf("[SSH] Dynamic forward: failed to read SOCKS request: %v", err)
 		return
 	}
 
 	if buf[0] != 0x05 || buf[1] != 0x01 {
-		log.Printf("[SSH] Dynamic forward: invalid SOCKS request")
 		return
 	}
 
@@ -583,7 +554,6 @@ func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
 		port := int(buf[5+hostLen])<<8 | int(buf[5+hostLen+1])
 		target = fmt.Sprintf("%s:%d", host, port)
 	default:
-		log.Printf("[SSH] Dynamic forward: unsupported address type %d", buf[3])
 		return
 	}
 
@@ -593,14 +563,12 @@ func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
 	c.mu.RUnlock()
 
 	if exited || client == nil {
-		log.Printf("[SSH] Dynamic forward: connection already closed, rejecting %s", target)
 		localConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 
 	remoteConn, err := client.Dial("tcp", target)
 	if err != nil {
-		log.Printf("[SSH] Dynamic forward: failed to dial %s: %v", target, err)
 		localConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}

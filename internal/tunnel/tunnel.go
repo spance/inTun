@@ -56,7 +56,6 @@ type Tunnel struct {
 	UploadSpeed   int64
 	DownloadSpeed int64
 	Latency       time.Duration
-	PingFailCount int
 	mu            sync.RWMutex
 }
 
@@ -212,7 +211,6 @@ func (t *Tunnel) UpdateStats(uploadBytes, downloadBytes, uploadSpeed, downloadSp
 	t.DownloadSpeed = downloadSpeed
 
 	if shouldPing && latency > 0 {
-		t.PingFailCount = 0
 		t.Latency = latency
 	}
 }
