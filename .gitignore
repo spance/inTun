@@ -1,3 +1,19 @@
+# Build output
 bin/
-intun
+/intun
+*.exe
+*.dll
+*.so
+*.dylib
+
+# macOS
 .DS_Store
+
+# Test coverage
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
