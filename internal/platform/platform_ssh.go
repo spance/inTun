@@ -130,14 +130,16 @@ func (c *SSHConnection) setError(msg string) {
 type SSHExecutor struct{}
 
 func init() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
 	logFile := os.Getenv("INTUN_LOG")
 	if logFile != "" {
+		log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
 		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err == nil {
 			log.SetOutput(f)
 			log.Printf("[SSH] Logging to %s", logFile)
 		}
+	} else {
+		log.SetOutput(io.Discard)
 	}
 }
 
