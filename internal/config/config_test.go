@@ -38,6 +38,16 @@ Host wildcard-*
 Host commented-host
     HostName commented.example.com
     User commenteduser
+
+Host labeled-host
+    #!! GroupLabels VM_debian vm22 vm33
+    HostName labeled.example.com
+    User labeluser
+    Port 2222
+
+Host single-label
+    #!! GroupLabels my-server
+    HostName single.example.com
 `
 	configPath := filepath.Join(sshDir, "config")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
@@ -62,6 +72,8 @@ Host commented-host
 		{Name: "full-host", Hostname: "full.example.com", User: "fulluser", Port: "22", IdentityFile: "~/.ssh/id_ed25519"},
 		{Name: "minimal-host", Hostname: "minimal-host", User: "testuser", Port: "22"},
 		{Name: "commented-host", Hostname: "commented.example.com", User: "commenteduser", Port: "22"},
+		{Name: "labeled-host", Hostname: "labeled.example.com", User: "labeluser", Port: "2222", Labels: []string{"VM_debian", "vm22", "vm33"}},
+		{Name: "single-label", Hostname: "single.example.com", User: "testuser", Port: "22", Labels: []string{"my-server"}},
 	}
 
 	if len(hosts) != len(want) {

@@ -14,6 +14,7 @@ type Host struct {
 	User         string
 	Port         string
 	IdentityFile string
+	Labels       []string
 }
 
 func ParseSSHConfig() ([]Host, error) {
@@ -35,7 +36,17 @@ func ParseSSHConfig() ([]Host, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "#") {
+			if currentHost != nil && strings.HasPrefix(line, "#!!") {
+				commentContent := strings.TrimSpace(strings.TrimPrefix(line, "#!!"))
+				if after, ok := strings.CutPrefix(commentContent, "GroupLabels "); ok {
+					currentHost.Labels = strings.Fields(after)
+				}
+			}
 			continue
 		}
 

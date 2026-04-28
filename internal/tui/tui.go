@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -51,8 +52,38 @@ var (
 			Bold(true)
 
 	selectedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7C3AED")).
+			Foreground(lipgloss.Color("#FFFFFF")).
 			Bold(true)
+
+	runningBadgeStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(lipgloss.Color("#10B981")).
+				Bold(true).
+				Padding(0, 1)
+
+	stoppedBadgeStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(lipgloss.Color("#6B7280")).
+				Padding(0, 1)
+
+	errorBadgeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#EF4444")).
+			Bold(true).
+			Padding(0, 1)
+
+	connectingBadgeStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#000000")).
+				Background(lipgloss.Color("#F59E0B")).
+				Padding(0, 1)
+
+	labelHighlightStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F59E0B")).
+				Bold(true)
+
+	labelSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FBBF24")).
+				Bold(true)
 
 	shortcutStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6B7280"))
@@ -201,7 +232,7 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		hostItems[i] = hostItem{host: h}
 	}
 
-	hostList := list.New(hostItems, list.NewDefaultDelegate(), 60, 30)
+	hostList := list.New(hostItems, newHostDelegate(), 60, 30)
 	hostList.Title = "Select Host"
 	hostList.SetShowStatusBar(false)
 	hostList.SetFilteringEnabled(true)
@@ -249,15 +280,76 @@ type hostItem struct {
 }
 
 func (h hostItem) FilterValue() string {
-	return h.host.Name
+	v := h.host.Name
+	if len(h.host.Labels) > 0 {
+		v += " " + strings.Join(h.host.Labels, " ")
+	}
+	return v
 }
 
 func (h hostItem) Title() string {
-	return h.host.Name
+	host := h.host.Hostname
+	if host == "" {
+		host = h.host.Name
+	}
+	if len(h.host.Labels) > 0 {
+		return host + " # " + strings.Join(h.host.Labels, ", ")
+	}
+	return host
 }
 
 func (h hostItem) Description() string {
 	return fmt.Sprintf("%s@%s:%s", h.host.User, h.host.Hostname, h.host.Port)
+}
+
+type hostDelegate struct {
+	styles list.DefaultItemStyles
+}
+
+func newHostDelegate() hostDelegate {
+	return hostDelegate{styles: list.NewDefaultItemStyles()}
+}
+
+func (d hostDelegate) Height() int  { return 2 }
+func (d hostDelegate) Spacing() int { return 1 }
+func (d hostDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+
+func (d hostDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	h, ok := item.(hostItem)
+	if !ok {
+		return
+	}
+
+	s := list.NewDefaultItemStyles()
+	selected := index == m.Index()
+
+	titleStyle := s.NormalTitle
+	descStyle := s.NormalDesc
+	if selected {
+		titleStyle = s.SelectedTitle
+		descStyle = s.SelectedDesc
+	}
+
+	host := h.host.Hostname
+	if host == "" {
+		host = h.host.Name
+	}
+
+	var title string
+	if len(h.host.Labels) > 0 {
+		labelStr := strings.Join(h.host.Labels, ", ")
+		if selected {
+			title = titleStyle.Render(host + " # ") + labelSelectedStyle.Render(labelStr)
+		} else {
+			title = titleStyle.Render(host + " # ") + labelHighlightStyle.Render(labelStr)
+		}
+	} else {
+		title = titleStyle.Render(host)
+	}
+
+	desc := descStyle.Render(h.Description())
+
+	fmt.Fprintf(w, "%s\n%s", title, desc)
 }
 
 type typeItem struct {
@@ -639,21 +731,21 @@ func (m Model) renderMainScreen() string {
 	b.WriteString("\n")
 
 	for i, t := range tunnels {
-		var dot string
 		var status string
+		var badgeStyle lipgloss.Style
 		switch t.Status {
 		case tunnel.StatusRunning:
-			dot = "●"
 			status = "Running"
+			badgeStyle = runningBadgeStyle
 		case tunnel.StatusError:
-			dot = "●"
 			status = "Error"
+			badgeStyle = errorBadgeStyle
 		case tunnel.StatusConnecting:
-			dot = "○"
 			status = "Connecting"
+			badgeStyle = connectingBadgeStyle
 		case tunnel.StatusStopped:
-			dot = "○"
 			status = "Stopped"
+			badgeStyle = stoppedBadgeStyle
 		}
 
 		remote := "-"
@@ -668,39 +760,34 @@ func (m Model) renderMainScreen() string {
 			latency = fmt.Sprintf("%dms", t.Latency.Milliseconds())
 		}
 
-		statusText := fmt.Sprintf("%-11s", status)
-
 		prefix := "  "
 		if i == m.selectedIndex {
 			prefix = "→ "
 		}
 
-		line := fmt.Sprintf("%s%-4d %-*s   %s %s %-6s %8s %8s %8s",
-			prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), dot, statusText,
-			t.Type.String(), ":"+t.LocalPort, remote, latency)
+		badge := badgeStyle.Render(status)
 
 		if i == m.selectedIndex {
+			line := fmt.Sprintf("%s%-4d %-*s   %s %-6s %8s %8s %8s",
+				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge,
+				t.Type.String(), ":"+t.LocalPort, remote, latency)
 			b.WriteString(selectedStyle.Render(line))
 		} else {
-			var coloredDot string
-			switch t.Status {
-			case tunnel.StatusRunning:
-				coloredDot = statusStyle.Render(dot)
-			case tunnel.StatusError:
-				coloredDot = errorStyle.Render(dot)
-			default:
-				coloredDot = dot
-			}
-			b.WriteString(fmt.Sprintf("%s%-4d %-*s   %s %s %-6s %8s %8s %8s",
-				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), coloredDot, statusText,
-				t.Type.String(), ":"+t.LocalPort, remote, latency))
+			line := fmt.Sprintf("%s%-4d %-*s   %s %-6s %8s %8s %8s",
+				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge,
+				t.Type.String(), ":"+t.LocalPort, remote, latency)
+			b.WriteString(line)
 		}
 		b.WriteString("\n")
 
 		speedLine := fmt.Sprintf("%12s    %12s    %12s    %12s",
 			formatSpeed(t.UploadSpeed, "↑"), formatSpeed(t.DownloadSpeed, "↓"),
 			formatTotal(t.UploadBytes, "↑"), formatTotal(t.DownloadBytes, "↓"))
-		b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Align(lipgloss.Right).Render(speedLine))
+		if i == m.selectedIndex {
+			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#C4B5FD")).Align(lipgloss.Right).Render(speedLine))
+		} else {
+			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Align(lipgloss.Right).Render(speedLine))
+		}
 		b.WriteString("\n")
 
 		if t.Status == tunnel.StatusError && t.Error != "" {

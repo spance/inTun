@@ -296,7 +296,7 @@ func TestANSIStylesPresent(t *testing.T) {
 	m := newTestModelWithTunnel()
 	output := m.View()
 
-	hasStyling := ansiRegex.MatchString(output) || strings.Contains(output, "●") || strings.Contains(output, "○")
+	hasStyling := ansiRegex.MatchString(output) || strings.Contains(output, "Running")
 	if !hasStyling {
 		t.Error("View output should contain visual styling indicators")
 	}
