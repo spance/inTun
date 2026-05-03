@@ -627,6 +627,28 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenMain
 			return m, nil
 		}
+		if m.selectedType == tunnel.Remote {
+			if m.inputMode == 0 {
+				if strings.Contains(m.portInput, ":") {
+					m.localPort = m.portInput
+				} else {
+					m.localPort = "127.0.0.1:" + m.portInput
+				}
+				m.portInput = ""
+				m.inputMode = 1
+				return m, nil
+			}
+			m.remotePort = m.portInput
+			cfg := &platform.SSHConfig{
+				Host:         m.selectedHost.Hostname,
+				Port:         m.selectedHost.Port,
+				User:         m.selectedHost.User,
+				IdentityFile: m.selectedHost.IdentityFile,
+			}
+			m.manager.Create(m.selectedHost.Name, cfg, m.selectedType, m.localPort, m.remotePort)
+			m.screen = ScreenMain
+			return m, nil
+		}
 		if m.inputMode == 0 {
 			m.localPort = m.portInput
 			m.portInput = ""
@@ -651,8 +673,18 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.portInput = m.portInput[:len(m.portInput)-1]
 		}
 	default:
-		if len(msg.String()) == 1 && msg.String()[0] >= '0' && msg.String()[0] <= '9' {
-			m.portInput += msg.String()
+		ch := msg.String()
+		if len(ch) == 1 {
+			c := ch[0]
+			if m.selectedType == tunnel.Remote && m.inputMode == 0 {
+				if (c >= '0' && c <= '9') || c == '.' || c == ':' {
+					m.portInput += ch
+				}
+			} else {
+				if c >= '0' && c <= '9' {
+					m.portInput += ch
+				}
+			}
 		}
 	}
 	return m, nil
@@ -834,6 +866,15 @@ func (m Model) renderPortInput() string {
 	if m.selectedType == tunnel.Dynamic {
 		b.WriteString(fmt.Sprintf("SOCKS Proxy Port: %s", m.portInput))
 		b.WriteString(shortcutStyle.Render("_"))
+	} else if m.selectedType == tunnel.Remote {
+		if m.inputMode == 0 {
+			b.WriteString(fmt.Sprintf("Local Target (ip:port or port): %s", m.portInput))
+			b.WriteString(shortcutStyle.Render("_"))
+		} else {
+			b.WriteString(fmt.Sprintf("Local Target: %s\n", m.localPort))
+			b.WriteString(fmt.Sprintf("Remote Listen Port: %s", m.portInput))
+			b.WriteString(shortcutStyle.Render("_"))
+		}
 	} else {
 		if m.inputMode == 0 {
 			b.WriteString(fmt.Sprintf("Local Port: %s", m.portInput))

@@ -391,7 +391,7 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 	}()
 }
 
-func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localPort, remotePort string) {
+func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remotePort string) {
 	listener, err := conn.client.Listen("tcp", "127.0.0.1:"+remotePort)
 	if err != nil {
 		conn.setError(fmt.Sprintf("REMOTE_LISTEN_FAILED: %v", err))
@@ -408,7 +408,7 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localPort, remoteP
 			if err != nil {
 				return
 			}
-			go conn.handleRemoteForward(remoteConn, localPort)
+			go conn.handleRemoteForward(remoteConn, localAddr)
 		}
 	}()
 }
@@ -492,10 +492,10 @@ func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string
 	<-done
 }
 
-func (c *SSHConnection) handleRemoteForward(remoteConn net.Conn, localPort string) {
+func (c *SSHConnection) handleRemoteForward(remoteConn net.Conn, localAddr string) {
 	defer remoteConn.Close()
 
-	localConn, err := net.Dial("tcp", "127.0.0.1:"+localPort)
+	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
 		return
 	}
