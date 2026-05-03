@@ -391,8 +391,8 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 	}()
 }
 
-func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remotePort string) {
-	listener, err := conn.client.Listen("tcp", "127.0.0.1:"+remotePort)
+func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteAddr string) {
+	listener, err := conn.client.Listen("tcp", remoteAddr)
 	if err != nil {
 		conn.setError(fmt.Sprintf("REMOTE_LISTEN_FAILED: %v", err))
 		if conn.client != nil {
