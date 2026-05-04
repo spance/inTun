@@ -751,14 +751,14 @@ func (m Model) renderMainScreen() string {
 
 	separator := strings.Repeat("=", lineWidth)
 
-	fixedWidth := 2 + 4 + 1 + 3 + 13 + 1 + 6 + 1 + 8 + 1 + 8 + 1 + 8
+	fixedWidth := 2 + 4 + 1 + 3 + 13 + 1 + 10 + 1 + 21 + 1 + 21 + 1 + 8
 	nameWidth := lineWidth - fixedWidth
 	if nameWidth < 10 {
 		nameWidth = 10
 	}
 
-	header := fmt.Sprintf("  %-4s %-*s   %-13s %-6s %8s %8s %8s",
-		"#", nameWidth, "Name", " Status", "Type", "Local", "Remote", "Latency")
+	header := fmt.Sprintf("  %-4s %-*s   %-13s %-10s %-21s %-21s %-8s",
+		"#", nameWidth, "Name", "Status", "Type", "Local", "Remote", "Latency")
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 	b.WriteString(lineStyle.Render(separator))
@@ -800,27 +800,32 @@ func (m Model) renderMainScreen() string {
 		}
 
 		badge := badgeStyle.Render(status)
+		badgeW := lipgloss.Width(badge)
+		badgePad := ""
+		if badgeW < 13 {
+			badgePad = strings.Repeat(" ", 13-badgeW)
+		}
 
 		if i == m.selectedIndex {
-			line := fmt.Sprintf("%s%-4d %-*s   %s %-6s %8s %8s %8s",
-				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge,
+			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-10s %-21s %-21s %-8s",
+				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge, badgePad,
 				t.Type.String(), ":"+t.LocalPort, remote, latency)
 			b.WriteString(selectedStyle.Render(line))
 		} else {
-			line := fmt.Sprintf("%s%-4d %-*s   %s %-6s %8s %8s %8s",
-				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge,
+			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-10s %-21s %-21s %-8s",
+				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge, badgePad,
 				t.Type.String(), ":"+t.LocalPort, remote, latency)
 			b.WriteString(line)
 		}
 		b.WriteString("\n")
 
-		speedLine := fmt.Sprintf("%12s    %12s    %12s    %12s",
+		speedLine := fmt.Sprintf("  %13s    %13s    %13s    %13s  ",
 			formatSpeed(t.UploadSpeed, "↑"), formatSpeed(t.DownloadSpeed, "↓"),
-			formatTotal(t.UploadBytes, "↑"), formatTotal(t.DownloadBytes, "↓"))
+			formatTotal(t.UploadBytes, "TX"), formatTotal(t.DownloadBytes, "RX"))
 		if i == m.selectedIndex {
-			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#C4B5FD")).Align(lipgloss.Right).Render(speedLine))
+			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#C4B5FD")).Align(lipgloss.Center).Render(speedLine))
 		} else {
-			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Align(lipgloss.Right).Render(speedLine))
+			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Align(lipgloss.Center).Render(speedLine))
 		}
 		b.WriteString("\n")
 
@@ -997,11 +1002,11 @@ func formatBytes(b int64) string {
 }
 
 func formatSpeed(bytes int64, dir string) string {
-	return fmt.Sprintf("%s/s%s", formatBytes(bytes), dir)
+	return fmt.Sprintf("%s%s/s", dir, formatBytes(bytes))
 }
 
 func formatTotal(bytes int64, dir string) string {
-	return fmt.Sprintf("%s∑%s", formatBytes(bytes), dir)
+	return fmt.Sprintf("%s%s", dir, formatBytes(bytes))
 }
 
 func min(a, b int) int {
