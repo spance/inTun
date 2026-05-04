@@ -36,15 +36,18 @@ func (c *SSHConnection) Stop() error {
 		if c.keepaliveStop != nil {
 			close(c.keepaliveStop)
 		}
-		for _, f := range c.forwards {
-			f.Close()
-		}
-		if c.client != nil {
-			err = c.client.Close()
-		}
 		c.mu.Lock()
+		forwards := c.forwards
+		client := c.client
 		c.exited = true
 		c.mu.Unlock()
+
+		for _, f := range forwards {
+			f.Close()
+		}
+		if client != nil {
+			err = client.Close()
+		}
 	})
 	return err
 }
@@ -59,11 +62,6 @@ func (c *SSHConnection) Error() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.lastError
-}
-
-func (c *SSHConnection) WaitForReady(timeout time.Duration) bool {
-	time.Sleep(timeout)
-	return true
 }
 
 func (c *SSHConnection) GetStats() (int64, int64) {
@@ -127,6 +125,12 @@ func (c *SSHConnection) setError(msg string) {
 	c.mu.Unlock()
 }
 
+func (c *SSHConnection) addForward(f io.Closer) {
+	c.mu.Lock()
+	c.forwards = append(c.forwards, f)
+	c.mu.Unlock()
+}
+
 type SSHExecutor struct{}
 
 func init() {
@@ -185,6 +189,11 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 		originalPort = "22"
 	}
 
+	port := cfg.Port
+	if port == "" {
+		port = "22"
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return knownHosts.VerifyHostKey(conn.authCtx, 0, originalHost, originalPort, key)
@@ -203,7 +212,7 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 	}
 	sshConfig.Auth = authMethods
 
-	addr := cfg.Host + ":" + cfg.Port
+	addr := cfg.Host + ":" + port
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -221,8 +230,10 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 		return
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
+	conn.mu.Lock()
 	conn.client = client
 	conn.keepaliveStop = make(chan struct{})
+	conn.mu.Unlock()
 
 	go conn.sendKeepalive()
 
@@ -378,7 +389,7 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 		}
 		return
 	}
-	conn.forwards = append(conn.forwards, listener)
+	conn.addForward(listener)
 
 	go func() {
 		for {
@@ -400,7 +411,7 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteA
 		}
 		return
 	}
-	conn.forwards = append(conn.forwards, listener)
+	conn.addForward(listener)
 
 	go func() {
 		for {
@@ -422,7 +433,7 @@ func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string)
 		}
 		return
 	}
-	conn.forwards = append(conn.forwards, listener)
+	conn.addForward(listener)
 
 	go func() {
 		for {
@@ -536,7 +547,12 @@ func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
 		return
 	}
 
+	socks5ErrReply := []byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+
 	if buf[0] != 0x05 || buf[1] != 0x01 {
+		if buf[0] == 0x05 {
+			localConn.Write(socks5ErrReply)
+		}
 		return
 	}
 
@@ -544,18 +560,21 @@ func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
 	switch buf[3] {
 	case 0x01:
 		if n < 10 {
+			localConn.Write(socks5ErrReply)
 			return
 		}
 		target = fmt.Sprintf("%d.%d.%d.%d:%d", buf[4], buf[5], buf[6], buf[7], int(buf[8])<<8|int(buf[9]))
 	case 0x03:
 		hostLen := int(buf[4])
 		if n < 5+hostLen+2 {
+			localConn.Write(socks5ErrReply)
 			return
 		}
 		host := string(buf[5 : 5+hostLen])
 		port := int(buf[5+hostLen])<<8 | int(buf[5+hostLen+1])
 		target = fmt.Sprintf("%s:%d", host, port)
 	default:
+		localConn.Write(socks5ErrReply)
 		return
 	}
 

@@ -107,8 +107,7 @@ func (m *Manager) Create(name string, cfg *platform.SSHConfig, tunnelType Tunnel
 
 	err := m.startTunnel(t)
 	if err != nil {
-		t.Status = StatusError
-		t.Error = err.Error()
+		t.setStatus(StatusError, err.Error())
 		return t, err
 	}
 
@@ -122,12 +121,11 @@ func (m *Manager) startTunnel(t *Tunnel) error {
 	}
 	t.Conn = conn
 	if !conn.IsRunning() {
-		t.Status = StatusError
-		t.Error = conn.Error()
-		return fmt.Errorf("connection failed immediately: %s", conn.Error())
+		errMsg := conn.Error()
+		t.setStatus(StatusError, errMsg)
+		return fmt.Errorf("connection failed immediately: %s", errMsg)
 	}
-	t.Status = StatusRunning
-	t.Error = ""
+	t.setStatus(StatusRunning, "")
 	return nil
 }
 
@@ -140,7 +138,7 @@ func (m *Manager) Stop(id int) error {
 			if t.Conn != nil {
 				t.Conn.Stop()
 			}
-			t.Status = StatusStopped
+			t.setStatus(StatusStopped, "")
 			return nil
 		}
 	}
@@ -149,23 +147,26 @@ func (m *Manager) Stop(id int) error {
 
 func (m *Manager) Restart(id int) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for _, t := range m.Tunnels {
 		if t.ID == id {
 			if t.Conn != nil {
 				t.Conn.Stop()
 			}
+			m.mu.Unlock()
+
 			time.Sleep(1 * time.Second)
-			t.Status = StatusConnecting
+
+			m.mu.Lock()
+			t.setStatus(StatusConnecting, "")
 			err := m.startTunnel(t)
 			if err != nil {
-				t.Status = StatusError
-				t.Error = err.Error()
+				t.setStatus(StatusError, err.Error())
 			}
+			m.mu.Unlock()
 			return err
 		}
 	}
+	m.mu.Unlock()
 	return fmt.Errorf("tunnel %d not found", id)
 }
 
@@ -236,4 +237,25 @@ func (t *Tunnel) GetError() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.Error
+}
+
+type StatsSnapshot struct {
+	UploadBytes   int64
+	DownloadBytes int64
+}
+
+func (t *Tunnel) GetSnapshot() StatsSnapshot {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return StatsSnapshot{
+		UploadBytes:   t.UploadBytes,
+		DownloadBytes: t.DownloadBytes,
+	}
+}
+
+func (t *Tunnel) setStatus(status Status, errMsg string) {
+	t.mu.Lock()
+	t.Status = status
+	t.Error = errMsg
+	t.mu.Unlock()
 }

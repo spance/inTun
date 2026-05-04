@@ -51,10 +51,6 @@ func (m *MockConnection) Error() string {
 	return m.err
 }
 
-func (m *MockConnection) WaitForReady(timeout time.Duration) bool {
-	return m.running
-}
-
 func (m *MockConnection) GetStats() (int64, int64) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -21,6 +21,20 @@ import (
 type AuthRequest = platform.AuthRequest
 type AuthResponse = platform.AuthResponse
 
+const (
+	minTermWidth   = 80
+	colIDW         = 4
+	colStatusW     = 13
+	colTypeW       = 10
+	colAddrW       = 21
+	colLatencyW    = 8
+	colFixedWidth  = 2 + colIDW + 1 + 3 + colStatusW + 1 + colTypeW + 1 + colAddrW + 1 + colAddrW + 1 + colLatencyW
+	defaultWidth   = 120
+	defaultHeight  = 30
+	hostListHeight = 30
+	typeListHeight = 12
+)
+
 type Screen int
 
 const (
@@ -232,7 +246,7 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		hostItems[i] = hostItem{host: h}
 	}
 
-	hostList := list.New(hostItems, newHostDelegate(), 60, 30)
+	hostList := list.New(hostItems, newHostDelegate(), 60, defaultHeight)
 	hostList.Title = "Select Host"
 	hostList.SetShowStatusBar(false)
 	hostList.SetFilteringEnabled(true)
@@ -244,7 +258,7 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		typeItem{name: "Dynamic (-D)", desc: "SOCKS proxy on local port", t: tunnel.Dynamic},
 	}
 
-	typeList := list.New(typeItems, list.NewDefaultDelegate(), 60, 12)
+	typeList := list.New(typeItems, list.NewDefaultDelegate(), 60, typeListHeight)
 	typeList.Title = "Select Tunnel Type"
 	typeList.SetShowStatusBar(false)
 	typeList.SetShowHelp(false)
@@ -270,7 +284,7 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		cancelCtx:     cancelCtx,
 		cancelFunc:    cancelFunc,
 		selectedIndex: 0,
-		width:         120,
+		width:         defaultWidth,
 		version:       version,
 	}
 }
@@ -403,14 +417,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		listHeight := msg.Height - 8
-		if listHeight > 30 {
-			listHeight = 30
+		if listHeight > hostListHeight {
+			listHeight = hostListHeight
 		}
 		if listHeight < 5 {
 			listHeight = 5
 		}
 		m.hostList.SetSize(msg.Width-4, listHeight)
-		m.typeList.SetSize(msg.Width-4, min(12, msg.Height-8))
+		m.typeList.SetSize(msg.Width-4, min(typeListHeight, msg.Height-8))
 		return m, nil
 	case sizeMsg:
 		if msg.width != m.width || msg.height != m.height {
@@ -502,7 +516,7 @@ func (m Model) handlePromptKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.pollAuthRequests()
 	case "backspace":
 		if len(m.promptInput) > 0 {
-			m.promptInput = m.promptInput[:len(m.promptInput)-1]
+			m.promptInput = string([]rune(m.promptInput)[:len([]rune(m.promptInput))-1])
 		}
 		return m, nil
 	default:
@@ -612,18 +626,21 @@ func (m Model) handleTypeSelectKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) buildSSHConfig() *platform.SSHConfig {
+	return &platform.SSHConfig{
+		Host:         m.selectedHost.Hostname,
+		Port:         m.selectedHost.Port,
+		User:         m.selectedHost.User,
+		IdentityFile: m.selectedHost.IdentityFile,
+	}
+}
+
 func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if m.selectedType == tunnel.Dynamic {
 			m.localPort = m.portInput
-			cfg := &platform.SSHConfig{
-				Host:         m.selectedHost.Hostname,
-				Port:         m.selectedHost.Port,
-				User:         m.selectedHost.User,
-				IdentityFile: m.selectedHost.IdentityFile,
-			}
-			m.manager.Create(m.selectedHost.Name, cfg, m.selectedType, m.localPort, "")
+			m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, "")
 			m.screen = ScreenMain
 			return m, nil
 		}
@@ -643,13 +660,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.remotePort = "127.0.0.1:" + m.portInput
 			}
-			cfg := &platform.SSHConfig{
-				Host:         m.selectedHost.Hostname,
-				Port:         m.selectedHost.Port,
-				User:         m.selectedHost.User,
-				IdentityFile: m.selectedHost.IdentityFile,
-			}
-			m.manager.Create(m.selectedHost.Name, cfg, m.selectedType, m.localPort, m.remotePort)
+			m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, m.remotePort)
 			m.screen = ScreenMain
 			return m, nil
 		}
@@ -660,13 +671,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.remotePort = m.portInput
-		cfg := &platform.SSHConfig{
-			Host:         m.selectedHost.Hostname,
-			Port:         m.selectedHost.Port,
-			User:         m.selectedHost.User,
-			IdentityFile: m.selectedHost.IdentityFile,
-		}
-		m.manager.Create(m.selectedHost.Name, cfg, m.selectedType, m.localPort, m.remotePort)
+		m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, m.remotePort)
 		m.screen = ScreenMain
 		return m, nil
 	case "esc", "q":
@@ -674,7 +679,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "backspace":
 		if len(m.portInput) > 0 {
-			m.portInput = m.portInput[:len(m.portInput)-1]
+			m.portInput = string([]rune(m.portInput)[:len([]rune(m.portInput))-1])
 		}
 	default:
 		ch := msg.String()
@@ -696,12 +701,12 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	width := m.width
-	if width < 80 {
+	if 	width < minTermWidth {
 		width = 80
 	}
 
 	title := fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
-	titlePadding := width - len(title)
+	titlePadding := width - lipgloss.Width(title)
 	if titlePadding > 0 {
 		title = title + strings.Repeat(" ", titlePadding)
 	}
@@ -745,13 +750,13 @@ func (m Model) renderMainScreen() string {
 	}
 
 	lineWidth := m.width
-	if lineWidth < 80 {
+	if 	lineWidth < minTermWidth {
 		lineWidth = 80
 	}
 
 	separator := strings.Repeat("=", lineWidth)
 
-	fixedWidth := 2 + 4 + 1 + 3 + 13 + 1 + 10 + 1 + 21 + 1 + 21 + 1 + 8
+	fixedWidth := colFixedWidth
 	nameWidth := lineWidth - fixedWidth
 	if nameWidth < 10 {
 		nameWidth = 10
@@ -802,15 +807,18 @@ func (m Model) renderMainScreen() string {
 		badge := badgeStyle.Render(status)
 		badgeW := lipgloss.Width(badge)
 		badgePad := ""
-		if badgeW < 13 {
-			badgePad = strings.Repeat(" ", 13-badgeW)
+		if badgeW < colStatusW {
+			badgePad = strings.Repeat(" ", colStatusW-badgeW)
 		}
 
 		if i == m.selectedIndex {
-			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-10s %-21s %-21s %-8s",
-				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge, badgePad,
+			plainPart := fmt.Sprintf("%s%-4d %-*s   ", prefix, t.ID, nameWidth, truncate(t.Name, nameWidth))
+			afterBadge := fmt.Sprintf(" %-10s %-21s %-21s %-8s",
 				t.Type.String(), ":"+t.LocalPort, remote, latency)
-			b.WriteString(selectedStyle.Render(line))
+			b.WriteString(selectedStyle.Render(plainPart))
+			b.WriteString(badge)
+			b.WriteString(badgePad)
+			b.WriteString(selectedStyle.Render(afterBadge))
 		} else {
 			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-10s %-21s %-21s %-8s",
 				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge, badgePad,
@@ -819,13 +827,13 @@ func (m Model) renderMainScreen() string {
 		}
 		b.WriteString("\n")
 
-		speedLine := fmt.Sprintf("  %13s    %13s    %13s    %13s  ",
+		speedLine := fmt.Sprintf("    %13s    %13s    %13s    %13s",
 			formatSpeed(t.UploadSpeed, "↑"), formatSpeed(t.DownloadSpeed, "↓"),
 			formatTotal(t.UploadBytes, "TX"), formatTotal(t.DownloadBytes, "RX"))
 		if i == m.selectedIndex {
-			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#C4B5FD")).Align(lipgloss.Center).Render(speedLine))
+			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#C4B5FD")).Render(speedLine))
 		} else {
-			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Align(lipgloss.Center).Render(speedLine))
+			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Render(speedLine))
 		}
 		b.WriteString("\n")
 
@@ -850,7 +858,7 @@ func (m Model) renderMainScreen() string {
 				cmdLine := fmt.Sprintf("      ssh %s@%s -p %s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)
 				b.WriteString(selectedStyle.Render(cmdLine))
 				b.WriteString("\n")
-			} else if strings.Contains(errMsg, "connection lost") {
+			} else if strings.Contains(errMsg, "SSH_CONNECTION_LOST") {
 				b.WriteString(errorStyle.Render("      SSH connection lost - press 'r' to reconnect"))
 				b.WriteString("\n")
 			} else {
@@ -914,7 +922,7 @@ func (m Model) renderPrompt() string {
 	} else {
 		attempt := current.RetryCount + 1
 		b.WriteString(fmt.Sprintf("Password for %s (attempt %d/3):\n", current.Host, attempt))
-		b.WriteString(fmt.Sprintf("[%s]\n\n", strings.Repeat("*", len(m.promptInput))))
+		b.WriteString(fmt.Sprintf("[%s]\n\n", strings.Repeat("*", len([]rune(m.promptInput)))))
 		b.WriteString(shortcutStyle.Render("[Enter] Submit  [Esc] Cancel"))
 	}
 
@@ -923,7 +931,7 @@ func (m Model) renderPrompt() string {
 
 func (m Model) renderShortcuts() string {
 	width := m.width
-	if width < 80 {
+	if 	width < minTermWidth {
 		width = 80
 	}
 
@@ -985,10 +993,14 @@ func (m Model) renderShortcuts() string {
 }
 
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
 }
 
 func formatBytes(b int64) string {

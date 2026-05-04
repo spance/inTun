@@ -64,7 +64,6 @@ type Connection interface {
 	Stop() error
 	IsRunning() bool
 	Error() string
-	WaitForReady(timeout time.Duration) bool
 	GetStats() (uploadBytes, downloadBytes int64)
 	Ping() time.Duration
 }

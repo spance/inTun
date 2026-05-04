@@ -64,7 +64,7 @@ func (m *Monitor) updateAllStats() {
 		if t.GetStatus() != tunnel.StatusRunning {
 			continue
 		}
-		go m.updateTunnelStats(t, shouldPing)
+		m.updateTunnelStats(t, shouldPing)
 	}
 }
 
@@ -78,9 +78,9 @@ func (m *Monitor) updateTunnelStats(t *tunnel.Tunnel, shouldPing bool) {
 		}
 		up, down = t.Conn.GetStats()
 
-		prevUp, prevDown := t.UploadBytes, t.DownloadBytes
-		deltaUp := up - prevUp
-		deltaDown := down - prevDown
+		prev := t.GetSnapshot()
+		deltaUp := up - prev.UploadBytes
+		deltaDown := down - prev.DownloadBytes
 
 		speedUp = int64(float64(deltaUp) * float64(time.Second) / float64(m.interval))
 		speedDown = int64(float64(deltaDown) * float64(time.Second) / float64(m.interval))

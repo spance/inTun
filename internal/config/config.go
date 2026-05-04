@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -89,9 +90,14 @@ func ParseSSHConfig() ([]Host, error) {
 	}
 
 	var validHosts []Host
-	currentUsername := os.Getenv("USER")
-	if currentUsername == "" {
-		currentUsername = os.Getenv("LOGNAME")
+	var currentUsername string
+	if u, err := user.Current(); err == nil {
+		currentUsername = u.Username
+	} else {
+		currentUsername = os.Getenv("USER")
+		if currentUsername == "" {
+			currentUsername = os.Getenv("LOGNAME")
+		}
 	}
 
 	for _, h := range hosts {

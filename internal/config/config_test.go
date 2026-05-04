@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"testing"
 
@@ -58,22 +59,25 @@ Host single-label
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", origHome)
 
-	origUser := os.Getenv("USER")
-	os.Setenv("USER", "testuser")
-	defer os.Setenv("USER", origUser)
-
 	hosts, err := ParseSSHConfig()
 	if err != nil {
 		t.Fatalf("ParseSSHConfig failed: %v", err)
 	}
 
+	var expectedUser string
+	if u, err := user.Current(); err == nil {
+		expectedUser = u.Username
+	} else {
+		expectedUser = os.Getenv("USER")
+	}
+
 	want := []Host{
 		{Name: "simple-host", Hostname: "simple.example.com", User: "simpleuser", Port: "2222"},
 		{Name: "full-host", Hostname: "full.example.com", User: "fulluser", Port: "22", IdentityFile: "~/.ssh/id_ed25519"},
-		{Name: "minimal-host", Hostname: "minimal-host", User: "testuser", Port: "22"},
+		{Name: "minimal-host", Hostname: "minimal-host", User: expectedUser, Port: "22"},
 		{Name: "commented-host", Hostname: "commented.example.com", User: "commenteduser", Port: "22"},
 		{Name: "labeled-host", Hostname: "labeled.example.com", User: "labeluser", Port: "2222", Labels: []string{"VM_debian", "vm22", "vm33"}},
-		{Name: "single-label", Hostname: "single.example.com", User: "testuser", Port: "22", Labels: []string{"my-server"}},
+		{Name: "single-label", Hostname: "single.example.com", User: expectedUser, Port: "22", Labels: []string{"my-server"}},
 	}
 
 	if len(hosts) != len(want) {
@@ -130,10 +134,6 @@ func TestHostDefaults(t *testing.T) {
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", origHome)
 
-	origUser := os.Getenv("USER")
-	os.Setenv("USER", "defaultuser")
-	defer os.Setenv("USER", origUser)
-
 	hosts, err := ParseSSHConfig()
 	if err != nil {
 		t.Fatalf("ParseSSHConfig failed: %v", err)
@@ -147,7 +147,14 @@ func TestHostDefaults(t *testing.T) {
 	if h.Port != "22" {
 		t.Errorf("Port = %q, want %q", h.Port, "22")
 	}
-	if h.User != "defaultuser" {
-		t.Errorf("User = %q, want %q", h.User, "defaultuser")
+
+	var expectedUser string
+	if u, err := user.Current(); err == nil {
+		expectedUser = u.Username
+	} else {
+		expectedUser = os.Getenv("USER")
+	}
+	if h.User != expectedUser {
+		t.Errorf("User = %q, want %q", h.User, expectedUser)
 	}
 }
