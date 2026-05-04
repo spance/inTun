@@ -39,14 +39,15 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.ver }}
         run: |
-          LDFLAGS="-s -w -X main.Version=${VERSION}"
           mkdir -p dist
-
-          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build $LDFLAGS -o dist/intun-darwin-amd64       ./cmd/intun
-          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build $LDFLAGS -o dist/intun-darwin-arm64       ./cmd/intun
-          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build $LDFLAGS -o dist/intun-linux-amd64        ./cmd/intun
-          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build $LDFLAGS -o dist/intun-linux-arm64        ./cmd/intun
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $LDFLAGS -o dist/intun-windows-amd64.exe  ./cmd/intun
+          build() {
+            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -ldflags "-s -w -X main.Version=${VERSION}" -o dist/$3 ./cmd/intun
+          }
+          build darwin  amd64 intun-darwin-amd64
+          build darwin  arm64 intun-darwin-arm64
+          build linux   amd64 intun-linux-amd64
+          build linux   arm64 intun-linux-arm64
+          build windows amd64 intun-windows-amd64.exe
 
       - name: Generate checksums
         run: |
