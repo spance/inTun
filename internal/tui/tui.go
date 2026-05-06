@@ -661,7 +661,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedIndex < len(tunnels)-1 {
 			m.selectedIndex++
 		}
-	case "e", "q", "ctrl+c":
+	case "q", "ctrl+c":
 		return m, tea.Quit
 	}
 	return m, nil
@@ -1036,7 +1036,7 @@ func (m Model) renderShortcuts() string {
 			"[" + keyStyle.Render("r") + "]Reconnect",
 			"[" + keyStyle.Render("s") + "]Stop/Start",
 			"[" + keyStyle.Render("d") + "]Delete",
-			"[" + keyStyle.Render("e") + "]Exit",
+			"[" + keyStyle.Render("q") + "]Quit",
 		}
 	case ScreenSelectHost, ScreenSelectType:
 		items = []string{

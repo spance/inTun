@@ -49,7 +49,7 @@ func TestViewContainsShortcuts(t *testing.T) {
 	output := m.View()
 	clean := stripANSI(output)
 
-	shortcuts := []string{"Navigate", "Create", "Reconnect", "Exit"}
+	shortcuts := []string{"Navigate", "Create", "Reconnect", "Quit"}
 	for _, s := range shortcuts {
 		if !strings.Contains(clean, s) {
 			t.Errorf("View output should contain shortcut '%s'", s)
