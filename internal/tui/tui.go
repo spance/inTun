@@ -1435,8 +1435,8 @@ func (m Model) renderSFTPScreen() string {
 
 	var b strings.Builder
 
-	localPanel := m.renderSFTPPanel("Local", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, m.sftpFocus == 0)
-	remotePanel := m.renderSFTPPanel("Remote", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, m.sftpFocus == 1)
+	localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, m.sftpFocus == 0)
+	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, m.sftpFocus == 1)
 
 	localLines := strings.Split(localPanel, "\n")
 	remoteLines := strings.Split(remotePanel, "\n")
@@ -1494,7 +1494,7 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 	b.WriteString(hdrStyle.Width(width).Render(fmt.Sprintf("%s: %s", label, dirDisplay)))
 	b.WriteString("\n")
 
-	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(strings.Repeat("─", width)))
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Width(width).Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
 
 	visibleHeight := m.height - 8
@@ -1560,11 +1560,11 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 		}
 
 		if i == cursor && focused {
-			b.WriteString(selectedStyle.Render(line))
+			b.WriteString(selectedStyle.Width(width).Render(line))
 		} else if i == cursor {
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render(line))
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Width(width).Render(line))
 		} else {
-			b.WriteString(shortcutStyle.Render(line))
+			b.WriteString(shortcutStyle.Width(width).Render(line))
 		}
 		b.WriteString("\n")
 		renderIdx++
