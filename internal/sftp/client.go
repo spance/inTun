@@ -45,7 +45,7 @@ func (s *Client) Close() error {
 	return s.client.Close()
 }
 
-const maxDirEntries = 10000
+const maxDirEntries = 1000
 
 func (s *Client) ReadRemoteDir(path string) ([]FileEntry, error) {
 	s.mu.Lock()
