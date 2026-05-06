@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -12,8 +13,10 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	sftplib "github.com/pkg/sftp"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
+	"github.com/spance/intun/internal/sftp"
 	"github.com/spance/intun/internal/tunnel"
 	"golang.org/x/term"
 )
@@ -42,6 +45,7 @@ const (
 	ScreenSelectHost
 	ScreenSelectType
 	ScreenInputPort
+	ScreenSFTP
 )
 
 var (
@@ -227,6 +231,24 @@ type Model struct {
 	authCtx       *platform.AuthContext
 	cancelCtx     context.Context
 	cancelFunc    context.CancelFunc
+
+	sftpClient       *sftp.Client
+	sftpLocalDir     string
+	sftpRemoteDir    string
+	sftpLocalFiles   []sftp.FileEntry
+	sftpRemoteFiles  []sftp.FileEntry
+	sftpFocus        int
+	sftpCursor       [2]int
+	sftpScroll       [2]int
+	sftpTransferring bool
+	sftpProgress     sftp.ProgressInfo
+	sftpPreview      string
+	sftpPreviewing   bool
+	sftpCancel       context.CancelFunc
+	sftpTunnelID     int
+	sftpHostLabel    string
+	sftpDone         chan struct{}
+	sftpDirection    string
 }
 
 type tickMsg struct{}
@@ -444,6 +466,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tickMsg:
+		if m.screen == ScreenSFTP && m.sftpDone != nil {
+			select {
+			case <-m.sftpDone:
+				m.sftpTransferring = false
+				m.sftpProgress.Active = false
+				m = m.refreshSFTPFiles()
+				m.sftpDone = nil
+			default:
+			}
+		}
 		return m, tea.Batch(
 			tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 				return tickMsg{}
@@ -483,6 +515,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleTypeSelectKeys(msg)
 	case ScreenInputPort:
 		return m.handlePortInputKeys(msg)
+	case ScreenSFTP:
+		return m.handleSFTPKeys(msg)
 	}
 	return m, nil
 }
@@ -567,6 +601,56 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.manager.Delete(tunnels[m.selectedIndex].ID)
 			if m.selectedIndex > 0 {
 				m.selectedIndex--
+			}
+		}
+	case "f":
+		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
+			t := tunnels[m.selectedIndex]
+			if t.Status == tunnel.StatusRunning {
+				rawClient, err := m.manager.GetSFTPClient(t.ID)
+				if err != nil {
+					m.err = err
+					return m, nil
+				}
+				sftpRaw, ok := rawClient.(*sftplib.Client)
+				if !ok {
+					m.err = fmt.Errorf("invalid SFTP client type")
+					return m, nil
+				}
+				m.sftpClient = sftp.NewClient(sftpRaw)
+				cwd, _ := os.Getwd()
+				m.sftpLocalDir = cwd
+				remoteDir, _ := sftpRaw.Getwd()
+				if remoteDir == "" {
+					remoteDir = "/"
+				}
+				m.sftpRemoteDir = remoteDir
+				localFiles, lerr := sftp.ReadLocalDir(m.sftpLocalDir)
+				if lerr != nil {
+					m.err = lerr
+					m.sftpClient = nil
+					return m, nil
+				}
+				remoteFiles, rerr := m.sftpClient.ReadRemoteDir(m.sftpRemoteDir)
+				if rerr != nil {
+					m.err = rerr
+					m.sftpClient = nil
+					return m, nil
+				}
+				m.sftpLocalFiles = localFiles
+				m.sftpRemoteFiles = remoteFiles
+				m.sftpFocus = 0
+				m.sftpCursor = [2]int{0, 0}
+				m.sftpScroll = [2]int{0, 0}
+				m.sftpTransferring = false
+				m.sftpPreview = ""
+				m.sftpPreviewing = false
+				m.sftpCancel = nil
+				m.sftpTunnelID = t.ID
+				m.sftpHostLabel = fmt.Sprintf("%s@%s:%s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)
+				m.sftpDone = nil
+				m.sftpDirection = ""
+				m.screen = ScreenSFTP
 			}
 		}
 	case "up", "k":
@@ -727,6 +811,8 @@ func (m Model) View() string {
 		b.WriteString(m.typeList.View())
 	case ScreenInputPort:
 		b.WriteString(m.renderPortInput())
+	case ScreenSFTP:
+		b.WriteString(m.renderSFTPScreen())
 	}
 
 	content := b.String()
@@ -958,6 +1044,30 @@ func (m Model) renderShortcuts() string {
 			"[" + keyStyle.Render("Enter") + "]Confirm",
 			"[" + keyStyle.Render("Esc") + "]Back",
 		}
+	case ScreenSFTP:
+		if m.sftpPreviewing {
+			items = []string{
+				"[" + keyStyle.Render("Esc") + "]关闭预览",
+			}
+		} else if m.sftpTransferring {
+			items = []string{
+				"[" + keyStyle.Render("Tab") + "]切换面板",
+				"[" + keyStyle.Render("↑↓") + "]导航",
+				"···传输中···",
+				"[" + keyStyle.Render("q") + "]返回",
+			}
+		} else {
+			items = []string{
+				"[" + keyStyle.Render("Tab") + "]切换面板",
+				"[" + keyStyle.Render("↑↓") + "]导航",
+				"[" + keyStyle.Render("Enter") + "]打开",
+				"[" + keyStyle.Render("u") + "]上传",
+				"[" + keyStyle.Render("d") + "]下载",
+				"[" + keyStyle.Render("r") + "]递归同步",
+				"[" + keyStyle.Render("v") + "]预览",
+				"[" + keyStyle.Render("q") + "]返回",
+			}
+		}
 	}
 
 	totalItemWidth := 0
@@ -1026,4 +1136,475 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.sftpPreviewing {
+		switch msg.String() {
+		case "esc", "q":
+			m.sftpPreviewing = false
+			m.sftpPreview = ""
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "q", "esc":
+		if m.sftpCancel != nil {
+			m.sftpCancel()
+			m.sftpCancel = nil
+		}
+		if m.sftpClient != nil {
+			m.sftpClient.Close()
+			m.sftpClient = nil
+		}
+		m.screen = ScreenMain
+		return m, nil
+	case "tab":
+		if m.sftpFocus == 0 {
+			m.sftpFocus = 1
+		} else {
+			m.sftpFocus = 0
+		}
+	case "up", "k":
+		if m.sftpCursor[m.sftpFocus] > 0 {
+			m.sftpCursor[m.sftpFocus]--
+		}
+	case "down", "j":
+		files := m.currentSFTPFiles()
+		if m.sftpCursor[m.sftpFocus] < len(files) {
+			m.sftpCursor[m.sftpFocus]++
+		}
+	case "enter":
+		return m.sftpEnterDir()
+	case "u":
+		if m.sftpFocus == 0 && !m.sftpTransferring {
+			return m.sftpStartUpload()
+		}
+	case "d":
+		if m.sftpFocus == 1 && !m.sftpTransferring {
+			return m.sftpStartDownload()
+		}
+	case "r":
+		if !m.sftpTransferring {
+			return m.sftpStartRecursive()
+		}
+	case "v":
+		if !m.sftpTransferring {
+			return m.sftpPreviewFile()
+		}
+	}
+	return m, nil
+}
+
+func (m Model) currentSFTPFiles() []sftp.FileEntry {
+	if m.sftpFocus == 0 {
+		return m.sftpLocalFiles
+	}
+	return m.sftpRemoteFiles
+}
+
+func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	var target string
+
+	if cursor == 0 {
+		if m.sftpFocus == 0 {
+			target = filepath.Dir(m.sftpLocalDir)
+		} else {
+			target = filepath.Dir(m.sftpRemoteDir)
+		}
+	} else {
+		idx := cursor - 1
+		if idx >= len(files) || !files[idx].IsDir {
+			return m, nil
+		}
+		if m.sftpFocus == 0 {
+			target = filepath.Join(m.sftpLocalDir, files[idx].Name)
+		} else {
+			if m.sftpRemoteDir == "/" {
+				target = "/" + files[idx].Name
+			} else {
+				target = m.sftpRemoteDir + "/" + files[idx].Name
+			}
+		}
+	}
+
+	return m.sftpNavigateTo(target)
+}
+
+func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
+	if m.sftpFocus == 0 {
+		localFiles, err := sftp.ReadLocalDir(path)
+		if err != nil {
+			return m, nil
+		}
+		m.sftpLocalDir = path
+		m.sftpLocalFiles = localFiles
+	} else {
+		remoteFiles, err := m.sftpClient.ReadRemoteDir(path)
+		if err != nil {
+			return m, nil
+		}
+		m.sftpRemoteDir = path
+		m.sftpRemoteFiles = remoteFiles
+	}
+	m.sftpCursor[m.sftpFocus] = 0
+	m.sftpScroll[m.sftpFocus] = 0
+	return m, nil
+}
+
+func (m Model) sftpStartUpload() (tea.Model, tea.Cmd) {
+	files := m.sftpLocalFiles
+	cursor := m.sftpCursor[0]
+	if cursor == 0 || cursor > len(files) {
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if entry.IsDir {
+		return m, nil
+	}
+	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	remotePath := m.sftpRemoteDir + "/" + entry.Name
+	m.sftpTransferring = true
+	m.sftpDirection = "↑"
+	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+	done := make(chan struct{})
+	m.sftpDone = done
+	client := m.sftpClient
+	go func() {
+		client.Upload(localPath, remotePath, nil)
+		close(done)
+	}()
+	return m, nil
+}
+
+func (m Model) sftpStartDownload() (tea.Model, tea.Cmd) {
+	files := m.sftpRemoteFiles
+	cursor := m.sftpCursor[1]
+	if cursor == 0 || cursor > len(files) {
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if entry.IsDir {
+		return m, nil
+	}
+	remotePath := m.sftpRemoteDir + "/" + entry.Name
+	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	m.sftpTransferring = true
+	m.sftpDirection = "↓"
+	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+	done := make(chan struct{})
+	m.sftpDone = done
+	client := m.sftpClient
+	go func() {
+		client.Download(remotePath, localPath, nil)
+		close(done)
+	}()
+	return m, nil
+}
+
+func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
+	if m.sftpFocus == 0 {
+		files := m.sftpLocalFiles
+		cursor := m.sftpCursor[0]
+		if cursor == 0 || cursor > len(files) {
+			return m, nil
+		}
+		entry := files[cursor-1]
+		if !entry.IsDir {
+			return m, nil
+		}
+		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+		remotePath := m.sftpRemoteDir + "/" + entry.Name
+		m.sftpTransferring = true
+		m.sftpDirection = "⇡"
+		m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Active: true}
+		done := make(chan struct{})
+		m.sftpDone = done
+		client := m.sftpClient
+		go func() {
+			client.UploadDir(localPath, remotePath, nil)
+			close(done)
+		}()
+		return m, nil
+	}
+
+	files := m.sftpRemoteFiles
+	cursor := m.sftpCursor[1]
+	if cursor == 0 || cursor > len(files) {
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if !entry.IsDir {
+		return m, nil
+	}
+	remotePath := m.sftpRemoteDir + "/" + entry.Name
+	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	m.sftpTransferring = true
+	m.sftpDirection = "⇣"
+	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Active: true}
+	done := make(chan struct{})
+	m.sftpDone = done
+	client := m.sftpClient
+	go func() {
+		client.DownloadDir(remotePath, localPath, nil)
+		close(done)
+	}()
+	return m, nil
+}
+
+func (m Model) sftpPreviewFile() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	if cursor == 0 || cursor > len(files) {
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if entry.IsDir {
+		return m, nil
+	}
+
+	if m.sftpFocus == 0 {
+		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			m.sftpPreview = fmt.Sprintf("Error: %v", err)
+			m.sftpPreviewing = true
+			return m, nil
+		}
+		if len(data) > 4096 {
+			data = data[:4096]
+		}
+		content := string(data)
+		if isBinaryContent(content) {
+			content = "[binary file]"
+		}
+		m.sftpPreview = content
+	} else {
+		remotePath := m.sftpRemoteDir + "/" + entry.Name
+		content, err := m.sftpClient.Preview(remotePath)
+		if err != nil {
+			m.sftpPreview = fmt.Sprintf("Error: %v", err)
+			m.sftpPreviewing = true
+			return m, nil
+		}
+		m.sftpPreview = content
+	}
+	m.sftpPreviewing = true
+	return m, nil
+}
+
+func (m Model) refreshSFTPFiles() Model {
+	localFiles, err := sftp.ReadLocalDir(m.sftpLocalDir)
+	if err == nil {
+		m.sftpLocalFiles = localFiles
+	}
+	remoteFiles, err := m.sftpClient.ReadRemoteDir(m.sftpRemoteDir)
+	if err == nil {
+		m.sftpRemoteFiles = remoteFiles
+	}
+	return m
+}
+
+func isBinaryContent(s string) bool {
+	for _, r := range s {
+		if r == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) renderSFTPScreen() string {
+	width := m.width
+	if width < minTermWidth {
+		width = 80
+	}
+	panelWidth := width/2 - 3
+	if panelWidth < 20 {
+		panelWidth = 20
+	}
+
+	var b strings.Builder
+	title := fmt.Sprintf(" inTun SFTP - %s", m.sftpHostLabel)
+	b.WriteString(titleStyle.Render(title))
+	b.WriteString("\n\n")
+
+	localPanel := m.renderSFTPPanel("Local", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, m.sftpFocus == 0)
+	remotePanel := m.renderSFTPPanel("Remote", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, m.sftpFocus == 1)
+
+	localLines := strings.Split(localPanel, "\n")
+	remoteLines := strings.Split(remotePanel, "\n")
+	maxLines := len(localLines)
+	if len(remoteLines) > maxLines {
+		maxLines = len(remoteLines)
+	}
+
+	gap := 2
+	for i := 0; i < maxLines; i++ {
+		var left, right string
+		if i < len(localLines) {
+			left = localLines[i]
+		}
+		if i < len(remoteLines) {
+			right = remoteLines[i]
+		}
+		leftPad := panelWidth - lipgloss.Width(left)
+		if leftPad < 0 {
+			leftPad = 0
+		}
+		b.WriteString(left)
+		b.WriteString(strings.Repeat(" ", leftPad+gap))
+		b.WriteString(right)
+		b.WriteString("\n")
+	}
+
+	if m.sftpTransferring {
+		b.WriteString(m.renderSFTPProgress(panelWidth))
+		b.WriteString("\n")
+	}
+
+	if m.sftpPreviewing {
+		b.WriteString(m.renderSFTPPreview(width))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width int, focused bool) string {
+	var b strings.Builder
+
+	hdrStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Bold(true)
+	if focused {
+		hdrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
+	}
+
+	dirDisplay := truncate(dir, width-len(label)-2)
+	b.WriteString(hdrStyle.Render(fmt.Sprintf("%s: %s", label, dirDisplay)))
+	b.WriteString("\n")
+
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(strings.Repeat("─", width)))
+	b.WriteString("\n")
+
+	visibleHeight := m.height - 10
+	if visibleHeight < 5 {
+		visibleHeight = 5
+	}
+	if visibleHeight > 20 {
+		visibleHeight = 20
+	}
+
+	cursor := m.sftpCursor[panelIdx]
+	scroll := m.sftpScroll[panelIdx]
+	if cursor < scroll {
+		scroll = cursor
+	}
+	if cursor > scroll+visibleHeight-1 {
+		scroll = cursor - visibleHeight + 1
+	}
+
+	totalEntries := len(files) + 1
+	renderIdx := 0
+	for i := scroll; i < totalEntries && renderIdx < visibleHeight; i++ {
+		var name, sizeStr string
+		var isDir bool
+
+		if i == 0 {
+			name = ".."
+			isDir = true
+		} else {
+			idx := i - 1
+			if idx >= len(files) {
+				break
+			}
+			entry := files[idx]
+			name = entry.Name
+			isDir = entry.IsDir
+			if !isDir && entry.Size > 0 {
+				sizeStr = formatBytes(entry.Size)
+			}
+		}
+
+		displayName := name
+		if isDir && i > 0 {
+			displayName = name + "/"
+		}
+
+		prefix := "  "
+		if i == cursor {
+			prefix = "▸ "
+		}
+
+		var line string
+		if sizeStr != "" {
+			nameWidth := width - 3 - len(sizeStr)
+			if nameWidth < 5 {
+				nameWidth = 5
+			}
+			truncated := truncate(displayName, nameWidth)
+			padLen := width - 3 - len(truncated) - len(sizeStr)
+			if padLen < 1 {
+				padLen = 1
+			}
+			line = prefix + truncated + strings.Repeat(" ", padLen) + sizeStr
+		} else {
+			line = prefix + truncate(displayName, width-3)
+		}
+
+		if i == cursor && focused {
+			b.WriteString(selectedStyle.Render(line))
+		} else if i == cursor {
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render(line))
+		} else {
+			b.WriteString(shortcutStyle.Render(line))
+		}
+		b.WriteString("\n")
+		renderIdx++
+	}
+
+	return b.String()
+}
+
+func (m Model) renderSFTPPreview(width int) string {
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true).Render("── Preview ──"))
+	b.WriteString("\n")
+
+	lines := strings.Split(m.sftpPreview, "\n")
+	maxLines := 20
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+
+	previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Width(width - 4)
+	for _, line := range lines {
+		displayLine := truncate(line, width-4)
+		b.WriteString(previewStyle.Render(displayLine))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m Model) renderSFTPProgress(width int) string {
+	p := m.sftpProgress
+	var pct float64
+	if p.Total > 0 {
+		pct = float64(p.Done) / float64(p.Total) * 100
+	}
+	barWidth := width / 3
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	filled := int(pct / 100 * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	progressStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	return progressStyle.Render(fmt.Sprintf("%s %s [%s] %.0f%%", m.sftpDirection, p.File, bar, pct))
 }
