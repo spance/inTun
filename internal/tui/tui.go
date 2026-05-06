@@ -789,7 +789,12 @@ func (m Model) View() string {
 		width = 80
 	}
 
-	title := fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
+	var title string
+	if m.screen == ScreenSFTP {
+		title = fmt.Sprintf(" inTun SFTP - %s", m.sftpHostLabel)
+	} else {
+		title = fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
+	}
 	titlePadding := width - lipgloss.Width(title)
 	if titlePadding > 0 {
 		title = title + strings.Repeat(" ", titlePadding)
@@ -1027,6 +1032,7 @@ func (m Model) renderShortcuts() string {
 		items = []string{
 			"[" + keyStyle.Render("↑↓") + "]Navigate",
 			"[" + keyStyle.Render("c") + "]Create",
+			"[" + keyStyle.Render("f") + "]SFTP",
 			"[" + keyStyle.Render("r") + "]Reconnect",
 			"[" + keyStyle.Render("s") + "]Stop/Start",
 			"[" + keyStyle.Render("d") + "]Delete",
@@ -1047,25 +1053,25 @@ func (m Model) renderShortcuts() string {
 	case ScreenSFTP:
 		if m.sftpPreviewing {
 			items = []string{
-				"[" + keyStyle.Render("Esc") + "]关闭预览",
+				"[" + keyStyle.Render("Esc") + "]Close Preview",
 			}
 		} else if m.sftpTransferring {
 			items = []string{
-				"[" + keyStyle.Render("Tab") + "]切换面板",
-				"[" + keyStyle.Render("↑↓") + "]导航",
-				"···传输中···",
-				"[" + keyStyle.Render("q") + "]返回",
+				"[" + keyStyle.Render("Tab") + "]Switch",
+				"[" + keyStyle.Render("↑↓") + "]Navigate",
+				"Transferring...",
+				"[" + keyStyle.Render("q") + "]Back",
 			}
 		} else {
 			items = []string{
-				"[" + keyStyle.Render("Tab") + "]切换面板",
-				"[" + keyStyle.Render("↑↓") + "]导航",
-				"[" + keyStyle.Render("Enter") + "]打开",
-				"[" + keyStyle.Render("u") + "]上传",
-				"[" + keyStyle.Render("d") + "]下载",
-				"[" + keyStyle.Render("r") + "]递归同步",
-				"[" + keyStyle.Render("v") + "]预览",
-				"[" + keyStyle.Render("q") + "]返回",
+				"[" + keyStyle.Render("Tab") + "]Switch",
+				"[" + keyStyle.Render("↑↓") + "]Navigate",
+				"[" + keyStyle.Render("Enter") + "]Open",
+				"[" + keyStyle.Render("u") + "]Upload",
+				"[" + keyStyle.Render("d") + "]Download",
+				"[" + keyStyle.Render("r") + "]Recurse",
+				"[" + keyStyle.Render("v") + "]Preview",
+				"[" + keyStyle.Render("q") + "]Back",
 			}
 		}
 	}
@@ -1428,9 +1434,6 @@ func (m Model) renderSFTPScreen() string {
 	}
 
 	var b strings.Builder
-	title := fmt.Sprintf(" inTun SFTP - %s", m.sftpHostLabel)
-	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n\n")
 
 	localPanel := m.renderSFTPPanel("Local", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, m.sftpFocus == 0)
 	remotePanel := m.renderSFTPPanel("Remote", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, m.sftpFocus == 1)
@@ -1455,9 +1458,14 @@ func (m Model) renderSFTPScreen() string {
 		if leftPad < 0 {
 			leftPad = 0
 		}
+		rightPad := panelWidth - lipgloss.Width(right)
+		if rightPad < 0 {
+			rightPad = 0
+		}
 		b.WriteString(left)
 		b.WriteString(strings.Repeat(" ", leftPad+gap))
 		b.WriteString(right)
+		b.WriteString(strings.Repeat(" ", rightPad))
 		b.WriteString("\n")
 	}
 
@@ -1483,18 +1491,15 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 	}
 
 	dirDisplay := truncate(dir, width-len(label)-2)
-	b.WriteString(hdrStyle.Render(fmt.Sprintf("%s: %s", label, dirDisplay)))
+	b.WriteString(hdrStyle.Width(width).Render(fmt.Sprintf("%s: %s", label, dirDisplay)))
 	b.WriteString("\n")
 
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
 
-	visibleHeight := m.height - 10
+	visibleHeight := m.height - 8
 	if visibleHeight < 5 {
 		visibleHeight = 5
-	}
-	if visibleHeight > 20 {
-		visibleHeight = 20
 	}
 
 	cursor := m.sftpCursor[panelIdx]
