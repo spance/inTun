@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -201,10 +202,24 @@ func (s *Client) Preview(path string) (string, error) {
 	}
 
 	content := string(buf[:n])
-	if isBinary(content) {
-		return "[binary file]", nil
+	if !isBinary(content) {
+		return content, nil
 	}
-	return content, nil
+
+	if n > 0 {
+		cmd := exec.Command("file", "-")
+		cmd.Stdin = strings.NewReader(string(buf[:n]))
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			result := strings.TrimSpace(string(out))
+			if idx := strings.Index(result, ": "); idx >= 0 {
+				result = result[idx+2:]
+			}
+			return "[binary] " + result, nil
+		}
+	}
+
+	return "[binary file]", nil
 }
 
 func isBinary(s string) bool {
