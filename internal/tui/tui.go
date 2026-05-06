@@ -1445,7 +1445,7 @@ func (m Model) renderSFTPScreen() string {
 		maxLines = len(remoteLines)
 	}
 
-	gap := 2
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("│")
 	for i := 0; i < maxLines; i++ {
 		var left, right string
 		if i < len(localLines) {
@@ -1463,7 +1463,10 @@ func (m Model) renderSFTPScreen() string {
 			rightPad = 0
 		}
 		b.WriteString(left)
-		b.WriteString(strings.Repeat(" ", leftPad+gap))
+		b.WriteString(strings.Repeat(" ", leftPad))
+		b.WriteString(" ")
+		b.WriteString(sep)
+		b.WriteString(" ")
 		b.WriteString(right)
 		b.WriteString(strings.Repeat(" ", rightPad))
 		b.WriteString("\n")
@@ -1498,9 +1501,6 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 		hdrText += strings.Repeat(" ", padW)
 	}
 	b.WriteString(hdrStyle.Render(hdrText))
-	b.WriteString("\n")
-
-	b.WriteString(lineStyle.Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
 
 	visibleHeight := m.height - 8
