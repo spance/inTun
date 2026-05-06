@@ -16,17 +16,19 @@ internal/
   ├── config/
   │   └── config.go            # ~/.ssh/config parser, returns []Host; supports #!! GroupLabels
   ├── platform/
-  │   ├── platform.go          # Core interfaces: Connection, Executor, AuthContext
-  │   ├── platform_ssh.go      # SSHExecutor.connect() - SSH handshake, tunnel creation, keepalive
+  │   ├── platform.go          # Core interfaces: Connection, SFTPCapable, Executor, AuthContext
+  │   ├── platform_ssh.go      # SSHExecutor.connect() - SSH handshake, tunnel creation, keepalive, NewSFTPClient
   │   ├── mock.go              # MockConnection + MockExecutor for testing
   │   ├── known_hosts.go       # Host key verification, VerifyHostKey() with host:port format
   │   └── counted_conn.go      # Traffic counting wrapper for net.Conn
   ├── tunnel/
-  │   └── tunnel.go            # Manager CRUD, Tunnel struct with stats, thread-safe setStatus
+  │   └── tunnel.go            # Manager CRUD, Tunnel struct with stats, thread-safe setStatus, GetSFTPClient
   ├── monitor/
   │   └── monitor.go           # Stats polling, ping every 5 ticks (1s interval), synchronous updates
+  ├── sftp/
+  │   └── client.go            # SFTP wrapper: ReadDir, Upload, Download, DownloadDir, UploadDir, Preview
   └── tui/
-      └── tui.go               # Bubbletea model, auth prompt queue, all UI rendering
+      └── tui.go               # Bubbletea model, auth prompt queue, all UI rendering, ScreenSFTP dual-panel
 ```
 
 ## Key Implementation Details
@@ -77,6 +79,14 @@ internal/
 - Supports no-auth only (method 0x00)
 - Address types: IPv4 (0x01) and domain (0x03)
 - Proper SOCKS5 error replies for unsupported commands/address types
+
+### SFTP File Manager
+- Entry: press `f` on Running tunnel, reuses SSH connection via SFTPCapable interface
+- Dual-panel: left=Local, right=Remote, Tab switches focus
+- Operations: Upload(u), Download(d), Recursive sync(r), Preview(v)
+- Transfer runs in goroutine, progress shown in bottom status bar
+- SFTPClient.mu serializes all sftp operations
+- Tunnel disconnect auto-closes SFTP screen
 
 ### Cross-platform
 - Username lookup: os/user.Current() with USER/LOGNAME fallback
