@@ -1491,10 +1491,16 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 	}
 
 	dirDisplay := truncate(dir, width-len(label)-2)
-	b.WriteString(hdrStyle.Width(width).Render(fmt.Sprintf("%s: %s", label, dirDisplay)))
+	hdrText := fmt.Sprintf("%s: %s", label, dirDisplay)
+	visibleW := lipgloss.Width(hdrText)
+	padW := width - visibleW
+	if padW > 0 {
+		hdrText += strings.Repeat(" ", padW)
+	}
+	b.WriteString(hdrStyle.Render(hdrText))
 	b.WriteString("\n")
 
-	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Width(width).Render(strings.Repeat("─", width)))
+	b.WriteString(lineStyle.Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
 
 	visibleHeight := m.height - 8
@@ -1560,11 +1566,23 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 		}
 
 		if i == cursor && focused {
-			b.WriteString(selectedStyle.Width(width).Render(line))
+			linePad := width - lipgloss.Width(line)
+			if linePad > 0 {
+				line += strings.Repeat(" ", linePad)
+			}
+			b.WriteString(selectedStyle.Render(line))
 		} else if i == cursor {
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Width(width).Render(line))
+			linePad := width - lipgloss.Width(line)
+			if linePad > 0 {
+				line += strings.Repeat(" ", linePad)
+			}
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render(line))
 		} else {
-			b.WriteString(shortcutStyle.Width(width).Render(line))
+			linePad := width - lipgloss.Width(line)
+			if linePad > 0 {
+				line += strings.Repeat(" ", linePad)
+			}
+			b.WriteString(shortcutStyle.Render(line))
 		}
 		b.WriteString("\n")
 		renderIdx++
