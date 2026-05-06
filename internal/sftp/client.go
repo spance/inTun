@@ -45,6 +45,8 @@ func (s *Client) Close() error {
 	return s.client.Close()
 }
 
+const maxDirEntries = 10000
+
 func (s *Client) ReadRemoteDir(path string) ([]FileEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -52,6 +54,10 @@ func (s *Client) ReadRemoteDir(path string) ([]FileEntry, error) {
 	infos, err := s.client.ReadDir(path)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(infos) > maxDirEntries {
+		infos = infos[:maxDirEntries]
 	}
 
 	entries := make([]FileEntry, 0, len(infos))
@@ -72,6 +78,10 @@ func ReadLocalDir(path string) ([]FileEntry, error) {
 	infos, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(infos) > maxDirEntries {
+		infos = infos[:maxDirEntries]
 	}
 
 	entries := make([]FileEntry, 0, len(infos))
