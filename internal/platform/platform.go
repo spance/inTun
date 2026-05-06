@@ -68,6 +68,10 @@ type Connection interface {
 	Ping() time.Duration
 }
 
+type SFTPCapable interface {
+	NewSFTPClient() (interface{}, error)
+}
+
 type Executor interface {
 	Connect(ctx *AuthContext, cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) (Connection, error)
 }
