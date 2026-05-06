@@ -1181,6 +1181,22 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.sftpCursor[m.sftpFocus] < len(files) {
 			m.sftpCursor[m.sftpFocus]++
 		}
+	case "pgup":
+		visibleHeight := m.sftpVisibleHeight()
+		cur := &m.sftpCursor[m.sftpFocus]
+		*cur -= visibleHeight
+		if *cur < 0 {
+			*cur = 0
+		}
+	case "pgdown":
+		files := m.currentSFTPFiles()
+		visibleHeight := m.sftpVisibleHeight()
+		maxCur := len(files)
+		cur := &m.sftpCursor[m.sftpFocus]
+		*cur += visibleHeight
+		if *cur > maxCur {
+			*cur = maxCur
+		}
 	case "enter":
 		return m.sftpEnterDir()
 	case "u":
@@ -1208,6 +1224,14 @@ func (m Model) currentSFTPFiles() []sftp.FileEntry {
 		return m.sftpLocalFiles
 	}
 	return m.sftpRemoteFiles
+}
+
+func (m Model) sftpVisibleHeight() int {
+	h := m.height - 8
+	if h < 5 {
+		h = 5
+	}
+	return h
 }
 
 func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
