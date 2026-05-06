@@ -71,3 +71,12 @@ func TestReadLocalDirEmpty(t *testing.T) {
 		t.Errorf("empty dir should have 0 entries, got %d", len(entries))
 	}
 }
+
+func TestIsBinary(t *testing.T) {
+	if isBinary("hello world") {
+		t.Error("plain text should not be binary")
+	}
+	if !isBinary("hello\x00world") {
+		t.Error("string with null byte should be binary")
+	}
+}
