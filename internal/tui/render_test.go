@@ -7,6 +7,7 @@ import (
 
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
+	"github.com/spance/intun/internal/sftp"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -350,6 +351,55 @@ func TestViewStatusMessage(t *testing.T) {
 	clean := stripANSI(output)
 	if !strings.Contains(clean, "Tunnel must be running") {
 		t.Error("View should show status message")
+	}
+}
+
+func TestViewSFTPShortcuts(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "test.txt", IsDir: false}}
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "remote.txt", IsDir: false}}
+	output := m.View()
+	clean := stripANSI(output)
+	for _, s := range []string{"Sync", "Sync Dir", "Rename", "Preview", "Back"} {
+		if !strings.Contains(clean, s) {
+			t.Errorf("SFTP view should contain shortcut '%s'", s)
+		}
+	}
+}
+
+func TestQuitConfirmWithRunningTunnel(t *testing.T) {
+	m := newTestModelWithTunnel()
+	tun := m.manager.List()[0]
+	tun.Status = tunnel.StatusRunning
+	output := m.View()
+	clean := stripANSI(output)
+	if strings.Contains(clean, "Press q again") {
+		t.Error("Should not show quit confirmation before pressing q")
+	}
+
+	m.quitConfirm = true
+	output = m.View()
+	clean = stripANSI(output)
+	if !strings.Contains(clean, "Press q again to quit") {
+		t.Error("Should show quit confirmation when quitConfirm is true")
+	}
+}
+
+func TestViewSFTPRenameInput(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "old.txt", IsDir: false}}
+	m.sftpRemoteFiles = []sftp.FileEntry{}
+	m.sftpRenaming = true
+	m.sftpRenameInput = "new.txt"
+	output := m.View()
+	clean := stripANSI(output)
+	if !strings.Contains(clean, "Rename: new.txt_") {
+		t.Error("Should show rename input")
+	}
+	if !strings.Contains(clean, "Confirm") {
+		t.Error("Should show confirm hint")
 	}
 }
 
