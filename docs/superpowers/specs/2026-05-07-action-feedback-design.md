@@ -10,6 +10,10 @@ Many keypresses in inTun are "silent operations" — when the precondition isn't
 - SFTP `d` on local panel → no response
 - SFTP `u`/`d` during transfer → no response
 
+Additionally:
+- Transfer progress only shows 0% and 100% because progress callbacks are `nil`
+- No rename support in SFTP
+
 ## Design
 
 ### 1. Status Message System
@@ -39,6 +43,9 @@ SFTP messages:
 |---|---|
 | Any operation during transfer | `Wait for transfer to complete` |
 | Sync with no file selected | `No file selected` |
+| Sync a file with `s` on a dir entry | `Use [r] for directory sync` |
+| Sync a dir with `r` on a file entry | `Use [s] for file sync` |
+| Rename on `..` entry | `Cannot rename parent directory` |
 
 ### 2. SFTP: Merge Upload/Download → Sync
 
@@ -53,12 +60,58 @@ Replace `u` (upload) and `d` (download) with a single `s` (sync) key:
 Updated SFTP shortcut bar:
 
 ```
-[↑↓]Navigate [Tab]Switch [Enter]Open [s]Sync [r]Sync Dir [v]Preview [q]Back
+[↑↓]Navigate [Tab]Switch [Enter]Open [s]Sync [r]Sync Dir [n]Rename [v]Preview [q]Back
 ```
 
 During transfer: `[Esc]Cancel  Syncing filename... 45%`
 
-### 3. Quit Confirmation
+### 3. SFTP: Rename Support
+
+Key: `n`
+
+Flow:
+1. User presses `n` on a selected file/dir (not `..`)
+2. TUI enters rename input mode: the file name becomes editable at the status bar position
+3. User types new name, `Enter` confirms, `Esc` cancels
+4. On confirm:
+   - Local panel: `os.Rename(oldPath, newPath)`
+   - Remote panel: `sftp.Client.Rename(oldPath, newPath)` via `Client.Rename()`
+5. After rename: refresh file listing, keep cursor position
+6. If rename fails: show error in `statusMsg`
+
+Model additions:
+- `sftpRenaming bool` — rename input mode active
+- `sftpRenameInput string` — current input text
+
+New method on `sftp.Client`:
+- `Rename(oldPath, newPath string) error` — wraps `sftp.Client.Rename()`
+
+Rendering: when `sftpRenaming` is true, status bar area shows `Rename: [input]_` with cursor, shortcut bar replaced by `[Enter]Confirm [Esc]Cancel`
+
+### 4. Transfer Progress Fix
+
+**Root cause:** All transfer goroutines pass `nil` as the progress callback. `sftpProgress.Done` is never updated during transfer, so progress stays at 0% until the `sftpDone` channel fires, then jumps to 100%.
+
+**Fix:** Add `sftpProgressPtr *sftp.ProgressInfo` to Model — a pointer that the goroutine can update safely (single-writer goroutine, single-reader tick).
+
+For single-file sync (`s`):
+- Goroutine passes a `progress func(int64)` callback that updates `sftpProgressPtr.Done` and estimates speed
+- Progress bar reads from `sftpProgressPtr` on each tick
+
+For recursive sync (`r`):
+- Goroutine passes a `progress func(done, total int64, file string)` callback that updates `sftpProgressPtr.Done`, `sftpProgressPtr.Total`, `sftpProgressPtr.File`
+- Progress bar shows file count and overall percentage
+
+Speed calculation:
+- Track `sftpProgress.Speed` (bytes/sec) — simple moving average: `(lastDone - prevDone) / tickInterval`
+- Display: `↑ filename [████░░░░] 45% 2.3MB/s`
+
+Progress bar rendering improvements:
+- Use `m.sftpProgressPtr` instead of value copy
+- Show speed when > 0
+- For recursive: show `file 3/10` index
+
+### 5. Quit Confirmation
 
 Add to Model:
 - `quitConfirm bool`
@@ -71,19 +124,19 @@ Behavior:
 
 The quit confirmation message replaces the status bar line (same position as `statusMsg`).
 
-### 4. Tick Handling
+### 6. Tick Handling
 
-Status message countdown happens in the existing 1-second tick handler (`tickMsg`). On each tick:
+Status message countdown happens in the existing tick handler (`tickMsg`). On each tick:
 1. If `statusTicks > 0`: decrement
-2. If `statusTicks == 0`: clear `statusMsg`
+2. If `statusTicks == 0` and `statusMsg != ""`: clear `statusMsg`
+3. During SFTP transfer: progress is already read from `sftpProgressPtr` on each render
 
 This reuses the monitor's tick interval — no new timer needed.
 
 ## Scope
 
-- Only `internal/tui/tui.go` changes
-- No changes to tunnel, platform, monitor, sftp, or config packages
-- No new dependencies
+- `internal/tui/tui.go` — status messages, quit confirm, rename UI, progress display, sync merge
+- `internal/sftp/client.go` — add `Rename()` method; no other changes needed (existing Download/Upload already accept progress callbacks)
 
 ## Not In Scope
 
