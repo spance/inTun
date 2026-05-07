@@ -252,6 +252,7 @@ type Model struct {
 	sftpHostLabel    string
 	sftpDone         chan struct{}
 	sftpDirection    string
+	sftpPrevDone     int64
 	sftpRenaming     bool
 	sftpRenameInput  string
 }
@@ -483,6 +484,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.screen == ScreenSFTP && m.sftpDone != nil {
+			if m.sftpTransferring {
+				m.sftpProgress.Speed = (m.sftpProgress.Done - m.sftpPrevDone) * 2
+				m.sftpPrevDone = m.sftpProgress.Done
+			}
 			select {
 			case <-m.sftpDone:
 				m.sftpTransferring = false
@@ -1132,9 +1137,9 @@ func (m Model) renderShortcuts() string {
 				"[" + keyStyle.Render("Tab") + "]Switch",
 				"[" + keyStyle.Render("↑↓") + "]Navigate",
 				"[" + keyStyle.Render("Enter") + "]Open",
-				"[" + keyStyle.Render("u") + "]Upload",
-				"[" + keyStyle.Render("d") + "]Download",
-				"[" + keyStyle.Render("r") + "]Recurse",
+				"[" + keyStyle.Render("s") + "]Sync",
+				"[" + keyStyle.Render("r") + "]Sync Dir",
+				"[" + keyStyle.Render("n") + "]Rename",
 				"[" + keyStyle.Render("v") + "]Preview",
 				"[" + keyStyle.Render("q") + "]Back",
 			}
@@ -1192,6 +1197,13 @@ func formatBytes(b int64) string {
 		return fmt.Sprintf("%.2f MB", float64(b)/float64(MB))
 	}
 	return fmt.Sprintf("%.2f KB", float64(b)/float64(KB))
+}
+
+func formatTransferSpeed(bytesPerSec int64) string {
+	if bytesPerSec >= 1024*1024 {
+		return fmt.Sprintf("%.1fMB/s", float64(bytesPerSec)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1fKB/s", float64(bytesPerSec)/1024)
 }
 
 func formatSpeed(bytes int64, dir string) string {
@@ -1283,22 +1295,24 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		return m.sftpEnterDir()
-	case "u":
-		if m.sftpFocus == 0 && !m.sftpTransferring {
-			return m.sftpStartUpload()
+	case "s":
+		if m.sftpTransferring {
+			m.setStatusMsg("Wait for transfer to complete")
+			return m, nil
 		}
-	case "d":
-		if m.sftpFocus == 1 && !m.sftpTransferring {
-			return m.sftpStartDownload()
-		}
+		return m.sftpStartSync()
 	case "r":
-		if !m.sftpTransferring {
-			return m.sftpStartRecursive()
+		if m.sftpTransferring {
+			m.setStatusMsg("Wait for transfer to complete")
+			return m, nil
 		}
+		return m.sftpStartRecursive()
 	case "v":
-		if !m.sftpTransferring {
-			return m.sftpPreviewFile()
+		if m.sftpTransferring {
+			m.setStatusMsg("Wait for transfer to complete")
+			return m, nil
 		}
+		return m.sftpPreviewFile()
 	case "n":
 		if !m.sftpTransferring {
 			files := m.currentSFTPFiles()
@@ -1382,39 +1396,46 @@ func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) sftpStartUpload() (tea.Model, tea.Cmd) {
-	files := m.sftpLocalFiles
-	cursor := m.sftpCursor[0]
-	if cursor == 0 || cursor > len(files) {
+func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
+	if m.sftpFocus == 0 {
+		files := m.sftpLocalFiles
+		cursor := m.sftpCursor[0]
+		if cursor == 0 || cursor > len(files) {
+			m.setStatusMsg("No file selected")
+			return m, nil
+		}
+		entry := files[cursor-1]
+		if entry.IsDir {
+			m.setStatusMsg("Use [r] for directory sync")
+			return m, nil
+		}
+		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+		remotePath := m.sftpRemoteDir + "/" + entry.Name
+		m.sftpTransferring = true
+		m.sftpDirection = "↑"
+		m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+		m.sftpPrevDone = 0
+		done := make(chan struct{})
+		m.sftpDone = done
+		client := m.sftpClient
+		go func() {
+			client.Upload(localPath, remotePath, func(n int64) {
+				m.sftpProgress.Done = n
+			})
+			close(done)
+		}()
 		return m, nil
 	}
-	entry := files[cursor-1]
-	if entry.IsDir {
-		return m, nil
-	}
-	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-	remotePath := m.sftpRemoteDir + "/" + entry.Name
-	m.sftpTransferring = true
-	m.sftpDirection = "↑"
-	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
-	done := make(chan struct{})
-	m.sftpDone = done
-	client := m.sftpClient
-	go func() {
-		client.Upload(localPath, remotePath, nil)
-		close(done)
-	}()
-	return m, nil
-}
 
-func (m Model) sftpStartDownload() (tea.Model, tea.Cmd) {
 	files := m.sftpRemoteFiles
 	cursor := m.sftpCursor[1]
 	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
 		return m, nil
 	}
 	entry := files[cursor-1]
 	if entry.IsDir {
+		m.setStatusMsg("Use [r] for directory sync")
 		return m, nil
 	}
 	remotePath := m.sftpRemoteDir + "/" + entry.Name
@@ -1422,11 +1443,14 @@ func (m Model) sftpStartDownload() (tea.Model, tea.Cmd) {
 	m.sftpTransferring = true
 	m.sftpDirection = "↓"
 	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+	m.sftpPrevDone = 0
 	done := make(chan struct{})
 	m.sftpDone = done
 	client := m.sftpClient
 	go func() {
-		client.Download(remotePath, localPath, nil)
+		client.Download(remotePath, localPath, func(n int64) {
+			m.sftpProgress.Done = n
+		})
 		close(done)
 	}()
 	return m, nil
@@ -1437,10 +1461,12 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 		files := m.sftpLocalFiles
 		cursor := m.sftpCursor[0]
 		if cursor == 0 || cursor > len(files) {
+			m.setStatusMsg("No file selected")
 			return m, nil
 		}
 		entry := files[cursor-1]
 		if !entry.IsDir {
+			m.setStatusMsg("Use [s] for file sync")
 			return m, nil
 		}
 		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
@@ -1448,11 +1474,16 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 		m.sftpTransferring = true
 		m.sftpDirection = "⇡"
 		m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Active: true}
+		m.sftpPrevDone = 0
 		done := make(chan struct{})
 		m.sftpDone = done
 		client := m.sftpClient
 		go func() {
-			client.UploadDir(localPath, remotePath, nil)
+			client.UploadDir(localPath, remotePath, func(done, total int64, file string) {
+				m.sftpProgress.Done = done
+				m.sftpProgress.Total = total
+				m.sftpProgress.File = file
+			})
 			close(done)
 		}()
 		return m, nil
@@ -1461,10 +1492,12 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 	files := m.sftpRemoteFiles
 	cursor := m.sftpCursor[1]
 	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
 		return m, nil
 	}
 	entry := files[cursor-1]
 	if !entry.IsDir {
+		m.setStatusMsg("Use [s] for file sync")
 		return m, nil
 	}
 	remotePath := m.sftpRemoteDir + "/" + entry.Name
@@ -1472,11 +1505,16 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 	m.sftpTransferring = true
 	m.sftpDirection = "⇣"
 	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Active: true}
+	m.sftpPrevDone = 0
 	done := make(chan struct{})
 	m.sftpDone = done
 	client := m.sftpClient
 	go func() {
-		client.DownloadDir(remotePath, localPath, nil)
+		client.DownloadDir(remotePath, localPath, func(done, total int64, file string) {
+			m.sftpProgress.Done = done
+			m.sftpProgress.Total = total
+			m.sftpProgress.File = file
+		})
 		close(done)
 	}()
 	return m, nil
@@ -1798,7 +1836,7 @@ func (m Model) renderSFTPProgress(width int) string {
 	if p.Total > 0 {
 		pct = float64(p.Done) / float64(p.Total) * 100
 	}
-	barWidth := width / 3
+	barWidth := width / 4
 	if barWidth < 10 {
 		barWidth = 10
 	}
@@ -1808,6 +1846,12 @@ func (m Model) renderSFTPProgress(width int) string {
 	}
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	var speedStr string
+	if p.Speed > 0 {
+		speedStr = " " + formatTransferSpeed(p.Speed)
+	}
+
 	progressStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-	return progressStyle.Render(fmt.Sprintf("%s %s [%s] %.0f%%", m.sftpDirection, p.File, bar, pct))
+	return progressStyle.Render(fmt.Sprintf("%s %s [%s] %.0f%%%s", m.sftpDirection, p.File, bar, pct, speedStr))
 }
