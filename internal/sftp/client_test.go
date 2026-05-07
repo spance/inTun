@@ -72,6 +72,26 @@ func TestReadLocalDirEmpty(t *testing.T) {
 	}
 }
 
+func TestReadLocalDirRename(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "old.txt"), []byte("data"), 0644)
+	os.Rename(filepath.Join(tmpDir, "old.txt"), filepath.Join(tmpDir, "new.txt"))
+	entries, err := ReadLocalDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadLocalDir failed: %v", err)
+	}
+	found := map[string]bool{}
+	for _, e := range entries {
+		found[e.Name] = true
+	}
+	if found["old.txt"] {
+		t.Error("old.txt should not exist after rename")
+	}
+	if !found["new.txt"] {
+		t.Error("new.txt should exist after rename")
+	}
+}
+
 func TestIsBinary(t *testing.T) {
 	if isBinary("hello world") {
 		t.Error("plain text should not be binary")

@@ -232,6 +232,12 @@ func (s *Client) Preview(path string) (string, error) {
 	return "[binary file]", nil
 }
 
+func (s *Client) Rename(oldPath, newPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client.Rename(oldPath, newPath)
+}
+
 func isBinary(s string) bool {
 	for _, r := range s {
 		if r == 0 {

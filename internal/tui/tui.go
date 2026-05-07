@@ -252,6 +252,8 @@ type Model struct {
 	sftpHostLabel    string
 	sftpDone         chan struct{}
 	sftpDirection    string
+	sftpRenaming     bool
+	sftpRenameInput  string
 }
 
 func (m *Model) setStatusMsg(msg string) {
@@ -1208,6 +1210,25 @@ func min(a, b int) int {
 }
 
 func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.sftpRenaming {
+		switch msg.String() {
+		case "enter":
+			return m.sftpConfirmRename()
+		case "esc":
+			m.sftpRenaming = false
+			m.sftpRenameInput = ""
+		case "backspace":
+			if len(m.sftpRenameInput) > 0 {
+				m.sftpRenameInput = m.sftpRenameInput[:len(m.sftpRenameInput)-1]
+			}
+		default:
+			if len(msg.String()) == 1 && msg.String()[0] >= 32 {
+				m.sftpRenameInput += msg.String()
+			}
+		}
+		return m, nil
+	}
+
 	if m.sftpPreviewing {
 		switch msg.String() {
 		case "esc", "q":
@@ -1277,6 +1298,19 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "v":
 		if !m.sftpTransferring {
 			return m.sftpPreviewFile()
+		}
+	case "n":
+		if !m.sftpTransferring {
+			files := m.currentSFTPFiles()
+			cursor := m.sftpCursor[m.sftpFocus]
+			if cursor == 0 || cursor > len(files) {
+				m.setStatusMsg("No file selected")
+				return m, nil
+			}
+			m.sftpRenaming = true
+			m.sftpRenameInput = files[cursor-1].Name
+		} else {
+			m.setStatusMsg("Wait for transfer to complete")
 		}
 	}
 	return m, nil
@@ -1489,6 +1523,44 @@ func (m Model) sftpPreviewFile() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) sftpConfirmRename() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	if cursor == 0 || cursor > len(files) {
+		m.sftpRenaming = false
+		m.sftpRenameInput = ""
+		return m, nil
+	}
+
+	oldName := files[cursor-1].Name
+	newName := m.sftpRenameInput
+	m.sftpRenaming = false
+	m.sftpRenameInput = ""
+
+	if newName == "" || newName == oldName {
+		return m, nil
+	}
+
+	if m.sftpFocus == 0 {
+		oldPath := filepath.Join(m.sftpLocalDir, oldName)
+		newPath := filepath.Join(m.sftpLocalDir, newName)
+		if err := os.Rename(oldPath, newPath); err != nil {
+			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
+			return m, nil
+		}
+	} else {
+		oldPath := m.sftpRemoteDir + "/" + oldName
+		newPath := m.sftpRemoteDir + "/" + newName
+		if err := m.sftpClient.Rename(oldPath, newPath); err != nil {
+			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
+			return m, nil
+		}
+	}
+
+	m = m.refreshSFTPFiles()
+	return m, nil
+}
+
 func (m Model) refreshSFTPFiles() Model {
 	localFiles, err := sftp.ReadLocalDir(m.sftpLocalDir)
 	if err == nil {
@@ -1556,6 +1628,27 @@ func (m Model) renderSFTPScreen() string {
 		b.WriteString(" ")
 		b.WriteString(right)
 		b.WriteString(strings.Repeat(" ", rightPad))
+		b.WriteString("\n")
+	}
+
+	if !m.sftpTransferring && !m.sftpPreviewing {
+		if msg := m.renderStatusMsg(width); msg != "" {
+			b.WriteString(msg)
+			b.WriteString("\n")
+		}
+	}
+
+	if m.sftpRenaming {
+		renameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		input := m.sftpRenameInput + "_"
+		hint := "Rename: " + input
+		confirmHint := "  [Enter]Confirm [Esc]Cancel"
+		rendered := renameStyle.Render(hint) + shortcutStyle.Render(confirmHint)
+		pad := width - lipgloss.Width(rendered)
+		if pad > 0 {
+			rendered += strings.Repeat(" ", pad)
+		}
+		b.WriteString(rendered)
 		b.WriteString("\n")
 	}
 
