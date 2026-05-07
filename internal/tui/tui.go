@@ -225,6 +225,9 @@ type Model struct {
 	height        int
 	version       string
 	err           error
+	statusMsg     string
+	statusTicks   int
+	quitConfirm   bool
 	authQueue     *AuthPromptQueue
 	promptMode    bool
 	promptInput   string
@@ -249,6 +252,11 @@ type Model struct {
 	sftpHostLabel    string
 	sftpDone         chan struct{}
 	sftpDirection    string
+}
+
+func (m *Model) setStatusMsg(msg string) {
+	m.statusMsg = msg
+	m.statusTicks = 3
 }
 
 type tickMsg struct{}
@@ -466,6 +474,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tickMsg:
+		if m.statusTicks > 0 {
+			m.statusTicks--
+			if m.statusTicks == 0 {
+				m.statusMsg = ""
+			}
+		}
 		if m.screen == ScreenSFTP && m.sftpDone != nil {
 			select {
 			case <-m.sftpDone:
@@ -504,6 +518,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.promptMode {
 		return m.handlePromptKeys(msg)
+	}
+
+	if m.screen == ScreenMain {
+		m.quitConfirm = false
 	}
 
 	switch m.screen {
@@ -586,6 +604,8 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
 			m.manager.Restart(tunnels[m.selectedIndex].ID)
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "s":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
@@ -594,7 +614,13 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.manager.Stop(t.ID)
 			} else if t.Status == tunnel.StatusStopped {
 				m.manager.Restart(t.ID)
+			} else if t.Status == tunnel.StatusConnecting {
+				m.setStatusMsg("Cannot stop: tunnel is connecting")
+			} else if t.Status == tunnel.StatusError {
+				m.setStatusMsg("Use [r] to reconnect")
 			}
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "d":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
@@ -602,6 +628,8 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedIndex > 0 {
 				m.selectedIndex--
 			}
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "f":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
@@ -651,7 +679,11 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.sftpDone = nil
 				m.sftpDirection = ""
 				m.screen = ScreenSFTP
+			} else {
+				m.setStatusMsg("Tunnel must be running to use SFTP")
 			}
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "up", "k":
 		if m.selectedIndex > 0 {
@@ -662,6 +694,16 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectedIndex++
 		}
 	case "q", "ctrl+c":
+		if m.quitConfirm {
+			return m, tea.Quit
+		}
+		tunnels := m.manager.List()
+		for _, t := range tunnels {
+			if t.Status == tunnel.StatusRunning {
+				m.quitConfirm = true
+				return m, nil
+			}
+		}
 		return m, tea.Quit
 	}
 	return m, nil
@@ -825,6 +867,10 @@ func (m Model) View() string {
 	remainingLines := m.height - lines - 1
 	if remainingLines > 0 {
 		content += strings.Repeat("\n", remainingLines)
+	}
+
+	if msg := m.renderStatusMsg(width); msg != "" {
+		content += msg + "\n"
 	}
 
 	return content + m.renderShortcuts()
@@ -1018,6 +1064,23 @@ func (m Model) renderPrompt() string {
 	}
 
 	return b.String()
+}
+
+func (m Model) renderStatusMsg(width int) string {
+	if m.statusMsg == "" && !m.quitConfirm {
+		return ""
+	}
+	msg := m.statusMsg
+	if m.quitConfirm {
+		msg = "Active tunnels running. Press q again to quit."
+	}
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	rendered := style.Render(msg)
+	pad := width - lipgloss.Width(rendered)
+	if pad > 0 {
+		rendered += strings.Repeat(" ", pad)
+	}
+	return rendered
 }
 
 func (m Model) renderShortcuts() string {

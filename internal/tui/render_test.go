@@ -342,6 +342,17 @@ func TestViewStoppedTunnel(t *testing.T) {
 	}
 }
 
+func TestViewStatusMessage(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.statusMsg = "Tunnel must be running"
+	m.statusTicks = 3
+	output := m.View()
+	clean := stripANSI(output)
+	if !strings.Contains(clean, "Tunnel must be running") {
+		t.Error("View should show status message")
+	}
+}
+
 func TestViewConnectingTunnel(t *testing.T) {
 	m := newTestModelWithTunnel()
 	tun := m.manager.List()[0]
