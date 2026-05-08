@@ -1150,18 +1150,20 @@ func renderDialogBox(width, height int, msg, hint string) string {
 	hLine := strings.Repeat("-", maxW)
 
 	var boxLines []string
+	bgPad := lipgloss.NewStyle().Background(lipgloss.Color("#78350F"))
+
 	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
 	for _, sl := range styledMsgLines {
 		padW := maxW - lipgloss.Width(sl)
 		if padW > 0 {
-			sl += strings.Repeat(" ", padW)
+			sl += bgPad.Render(strings.Repeat(" ", padW))
 		}
 		boxLines = append(boxLines, borderStyle.Render("|")+sl+borderStyle.Render("|"))
 	}
 	if styledHint != "" {
 		padW := maxW - lipgloss.Width(styledHint)
 		if padW > 0 {
-			styledHint += strings.Repeat(" ", padW)
+			styledHint += bgPad.Render(strings.Repeat(" ", padW))
 		}
 		boxLines = append(boxLines, borderStyle.Render("|")+styledHint+borderStyle.Render("|"))
 	}
