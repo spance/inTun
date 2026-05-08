@@ -1422,6 +1422,7 @@ func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
 	} else {
 		idx := cursor - 1
 		if idx >= len(files) || !files[idx].IsDir {
+			m.setStatusMsg("Use [v] to preview, [s] to sync")
 			return m, nil
 		}
 		if m.sftpFocus == 0 {
@@ -1442,6 +1443,7 @@ func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
 	if m.sftpFocus == 0 {
 		localFiles, err := sftp.ReadLocalDir(path)
 		if err != nil {
+			m.setStatusMsg("Cannot open directory")
 			return m, nil
 		}
 		m.sftpLocalDir = path
@@ -1449,6 +1451,7 @@ func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
 	} else {
 		remoteFiles, err := m.sftpClient.ReadRemoteDir(path)
 		if err != nil {
+			m.setStatusMsg("Cannot open directory")
 			return m, nil
 		}
 		m.sftpRemoteDir = path
@@ -1587,10 +1590,12 @@ func (m Model) sftpPreviewFile() (tea.Model, tea.Cmd) {
 	files := m.currentSFTPFiles()
 	cursor := m.sftpCursor[m.sftpFocus]
 	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
 		return m, nil
 	}
 	entry := files[cursor-1]
 	if entry.IsDir {
+		m.setStatusMsg("Cannot preview a directory")
 		return m, nil
 	}
 
