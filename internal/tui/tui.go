@@ -1116,19 +1116,29 @@ func renderDialogBox(width, height int, msg, hint string) string {
 		Background(lipgloss.Color("#78350F")).
 		Padding(0, 2)
 
-	parts := []string{contentStyle.Render(msg)}
+	msgLines := strings.Split(msg, "\n")
+	styledMsgLines := make([]string, len(msgLines))
+	for i, ml := range msgLines {
+		styledMsgLines[i] = contentStyle.Render(ml)
+	}
+
+	var styledHint string
 	if hint != "" {
 		hintStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#9CA3AF")).
 			Background(lipgloss.Color("#78350F"))
-		parts = append(parts, hintStyle.Render(hint))
+		styledHint = hintStyle.Render(hint)
 	}
 
 	maxW := 0
-	styledLines := make([]string, len(parts))
-	for i, p := range parts {
-		styledLines[i] = p
-		w := lipgloss.Width(p)
+	for _, sl := range styledMsgLines {
+		w := lipgloss.Width(sl)
+		if w > maxW {
+			maxW = w
+		}
+	}
+	if styledHint != "" {
+		w := lipgloss.Width(styledHint)
 		if w > maxW {
 			maxW = w
 		}
@@ -1141,12 +1151,19 @@ func renderDialogBox(width, height int, msg, hint string) string {
 
 	var boxLines []string
 	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
-	for _, sl := range styledLines {
+	for _, sl := range styledMsgLines {
 		padW := maxW - lipgloss.Width(sl)
 		if padW > 0 {
 			sl += strings.Repeat(" ", padW)
 		}
 		boxLines = append(boxLines, borderStyle.Render("|")+sl+borderStyle.Render("|"))
+	}
+	if styledHint != "" {
+		padW := maxW - lipgloss.Width(styledHint)
+		if padW > 0 {
+			styledHint += strings.Repeat(" ", padW)
+		}
+		boxLines = append(boxLines, borderStyle.Render("|")+styledHint+borderStyle.Render("|"))
 	}
 	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
 
@@ -1580,7 +1597,7 @@ func (m Model) sftpStartRecursiveConfirm() (tea.Model, tea.Cmd) {
 	}
 
 	m.sftpSyncConfirm = true
-	m.sftpSyncConfirmMsg = fmt.Sprintf("%s  ->  %s  (overwrite, no delete)", src, dst)
+	m.sftpSyncConfirmMsg = fmt.Sprintf("FROM: %s\nTO:   %s", src, dst)
 	return m, nil
 }
 
