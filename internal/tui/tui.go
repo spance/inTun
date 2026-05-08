@@ -253,8 +253,10 @@ type Model struct {
 	sftpDone         chan struct{}
 	sftpDirection    string
 	sftpPrevDone     int64
-	sftpRenaming     bool
-	sftpRenameInput  string
+	sftpRenaming       bool
+	sftpRenameInput    string
+	sftpSyncConfirm    bool
+	sftpSyncConfirmMsg string
 }
 
 func (m *Model) setStatusMsg(msg string) {
@@ -1095,6 +1097,9 @@ func (m Model) renderPrompt() string {
 }
 
 func (m Model) renderStatusOverlay(width, height int) string {
+	if m.sftpSyncConfirm {
+		return renderDialogBox(width, height, m.sftpSyncConfirmMsg, "[Enter] Confirm  [Esc] Cancel")
+	}
 	if m.statusMsg == "" && !m.quitConfirm {
 		return ""
 	}
@@ -1102,25 +1107,51 @@ func (m Model) renderStatusOverlay(width, height int) string {
 	if m.quitConfirm {
 		msg = "Active tunnels running. Press q again to quit."
 	}
+	return renderDialogBox(width, height, msg, "")
+}
 
+func renderDialogBox(width, height int, msg, hint string) string {
 	contentStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FDE68A")).
 		Background(lipgloss.Color("#78350F")).
 		Padding(0, 2)
-	inner := contentStyle.Render(msg)
-	innerW := lipgloss.Width(inner)
-	innerH := lipgloss.Height(inner)
+
+	parts := []string{contentStyle.Render(msg)}
+	if hint != "" {
+		hintStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#9CA3AF")).
+			Background(lipgloss.Color("#78350F"))
+		parts = append(parts, hintStyle.Render(hint))
+	}
+
+	maxW := 0
+	styledLines := make([]string, len(parts))
+	for i, p := range parts {
+		styledLines[i] = p
+		w := lipgloss.Width(p)
+		if w > maxW {
+			maxW = w
+		}
+	}
 
 	borderStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FBBF24")).
 		Background(lipgloss.Color("#78350F"))
-	hLine := strings.Repeat("-", innerW)
-	top := borderStyle.Render("+" + hLine + "+")
-	mid := borderStyle.Render("|") + inner + borderStyle.Render("|")
-	bot := borderStyle.Render("+" + hLine + "+")
+	hLine := strings.Repeat("-", maxW)
 
-	boxW := lipgloss.Width(top)
-	boxH := innerH + 2
+	var boxLines []string
+	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
+	for _, sl := range styledLines {
+		padW := maxW - lipgloss.Width(sl)
+		if padW > 0 {
+			sl += strings.Repeat(" ", padW)
+		}
+		boxLines = append(boxLines, borderStyle.Render("|")+sl+borderStyle.Render("|"))
+	}
+	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
+
+	boxW := lipgloss.Width(boxLines[0])
+	boxH := len(boxLines)
 
 	row := height/2 - boxH/2
 	col := (width - boxW) / 2
@@ -1128,22 +1159,13 @@ func (m Model) renderStatusOverlay(width, height int) string {
 	var b strings.Builder
 	for y := 0; y < height; y++ {
 		if y == row {
-			if col > 0 {
-				b.WriteString(strings.Repeat(" ", col))
-			}
-			b.WriteString(top)
-			b.WriteString("\n")
-			for i := 0; i < innerH; i++ {
+			for _, bl := range boxLines {
 				if col > 0 {
 					b.WriteString(strings.Repeat(" ", col))
 				}
-				b.WriteString(mid)
+				b.WriteString(bl)
 				b.WriteString("\n")
 			}
-			if col > 0 {
-				b.WriteString(strings.Repeat(" ", col))
-			}
-			b.WriteString(bot)
 			y += boxH - 1
 		}
 		if y < height-1 {
@@ -1304,6 +1326,19 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.sftpSyncConfirm {
+		switch msg.String() {
+		case "enter":
+			m.sftpSyncConfirm = false
+			m.sftpSyncConfirmMsg = ""
+			return m.sftpDoRecursive()
+		case "esc":
+			m.sftpSyncConfirm = false
+			m.sftpSyncConfirmMsg = ""
+		}
+		return m, nil
+	}
+
 	if m.sftpPreviewing {
 		switch msg.String() {
 		case "esc", "q":
@@ -1369,7 +1404,7 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setStatusMsg("Wait for transfer to complete")
 			return m, nil
 		}
-		return m.sftpStartRecursive()
+		return m.sftpStartRecursiveConfirm()
 	case "v":
 		if m.sftpTransferring {
 			m.setStatusMsg("Wait for transfer to complete")
@@ -1522,17 +1557,42 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
+func (m Model) sftpStartRecursiveConfirm() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if !entry.IsDir {
+		m.setStatusMsg("Use [s] for file sync")
+		return m, nil
+	}
+
+	var src, dst string
+	if m.sftpFocus == 0 {
+		src = filepath.Join(m.sftpLocalDir, entry.Name)
+		dst = m.sftpRemoteDir + "/" + entry.Name
+	} else {
+		src = m.sftpRemoteDir + "/" + entry.Name
+		dst = filepath.Join(m.sftpLocalDir, entry.Name)
+	}
+
+	m.sftpSyncConfirm = true
+	m.sftpSyncConfirmMsg = fmt.Sprintf("%s  ->  %s  (overwrite, no delete)", src, dst)
+	return m, nil
+}
+
+func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
 	if m.sftpFocus == 0 {
 		files := m.sftpLocalFiles
 		cursor := m.sftpCursor[0]
 		if cursor == 0 || cursor > len(files) {
-			m.setStatusMsg("No file selected")
 			return m, nil
 		}
 		entry := files[cursor-1]
 		if !entry.IsDir {
-			m.setStatusMsg("Use [s] for file sync")
 			return m, nil
 		}
 		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
@@ -1558,16 +1618,14 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 	files := m.sftpRemoteFiles
 	cursor := m.sftpCursor[1]
 	if cursor == 0 || cursor > len(files) {
-		m.setStatusMsg("No file selected")
 		return m, nil
 	}
 	entry := files[cursor-1]
 	if !entry.IsDir {
-		m.setStatusMsg("Use [s] for file sync")
 		return m, nil
 	}
 	remotePath := m.sftpRemoteDir + "/" + entry.Name
-	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	localPath := filepath.Join(m.sftpLocalDir + "/" + entry.Name)
 	m.sftpTransferring = true
 	m.sftpDirection = "⇣"
 	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
