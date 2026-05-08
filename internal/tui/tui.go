@@ -1103,13 +1103,24 @@ func (m Model) renderStatusOverlay(width, height int) string {
 		msg = "Active tunnels running. Press q again to quit."
 	}
 
-	boxStyle := lipgloss.NewStyle().
+	contentStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FDE68A")).
 		Background(lipgloss.Color("#78350F")).
-		Padding(0, 3)
-	box := boxStyle.Render(msg)
-	boxW := lipgloss.Width(box)
-	boxH := lipgloss.Height(box)
+		Padding(0, 2)
+	inner := contentStyle.Render(msg)
+	innerW := lipgloss.Width(inner)
+	innerH := lipgloss.Height(inner)
+
+	borderStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FBBF24")).
+		Background(lipgloss.Color("#78350F"))
+	hLine := strings.Repeat("-", innerW)
+	top := borderStyle.Render("+" + hLine + "+")
+	mid := borderStyle.Render("|") + inner + borderStyle.Render("|")
+	bot := borderStyle.Render("+" + hLine + "+")
+
+	boxW := lipgloss.Width(top)
+	boxH := innerH + 2
 
 	row := height/2 - boxH/2
 	col := (width - boxW) / 2
@@ -1120,7 +1131,19 @@ func (m Model) renderStatusOverlay(width, height int) string {
 			if col > 0 {
 				b.WriteString(strings.Repeat(" ", col))
 			}
-			b.WriteString(box)
+			b.WriteString(top)
+			b.WriteString("\n")
+			for i := 0; i < innerH; i++ {
+				if col > 0 {
+					b.WriteString(strings.Repeat(" ", col))
+				}
+				b.WriteString(mid)
+				b.WriteString("\n")
+			}
+			if col > 0 {
+				b.WriteString(strings.Repeat(" ", col))
+			}
+			b.WriteString(bot)
 			y += boxH - 1
 		}
 		if y < height-1 {
