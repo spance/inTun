@@ -876,11 +876,23 @@ func (m Model) View() string {
 		content += strings.Repeat("\n", remainingLines)
 	}
 
-	if msg := m.renderStatusMsg(width); msg != "" {
-		content += msg + "\n"
+	content += m.renderShortcuts()
+
+	if overlay := m.renderStatusOverlay(width, m.height); overlay != "" {
+		content = lipgloss.Place(width, m.height, lipgloss.Center, lipgloss.Center, content, lipgloss.WithWhitespaceChars(" "))
+		lines := strings.Split(content, "\n")
+		overlayLines := strings.Split(overlay, "\n")
+		result := make([]string, 0, len(lines))
+		for i, line := range lines {
+			if i < len(overlayLines) && strings.TrimSpace(overlayLines[i]) != "" {
+				line = overlayLines[i]
+			}
+			result = append(result, line)
+		}
+		content = strings.Join(result, "\n")
 	}
 
-	return content + m.renderShortcuts()
+	return content
 }
 
 func (m Model) renderMainScreen() string {
@@ -1073,7 +1085,7 @@ func (m Model) renderPrompt() string {
 	return b.String()
 }
 
-func (m Model) renderStatusMsg(width int) string {
+func (m Model) renderStatusOverlay(width, height int) string {
 	if m.statusMsg == "" && !m.quitConfirm {
 		return ""
 	}
@@ -1081,13 +1093,12 @@ func (m Model) renderStatusMsg(width int) string {
 	if m.quitConfirm {
 		msg = "Active tunnels running. Press q again to quit."
 	}
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-	rendered := style.Render(msg)
-	pad := width - lipgloss.Width(rendered)
-	if pad > 0 {
-		rendered += strings.Repeat(" ", pad)
-	}
-	return rendered
+	boxStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FDE68A")).
+		Background(lipgloss.Color("#92400E")).
+		Padding(0, 2)
+	box := boxStyle.Render(msg)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box, lipgloss.WithWhitespaceChars(" "), lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")))
 }
 
 func (m Model) renderShortcuts() string {
@@ -1667,13 +1678,6 @@ func (m Model) renderSFTPScreen() string {
 		b.WriteString(right)
 		b.WriteString(strings.Repeat(" ", rightPad))
 		b.WriteString("\n")
-	}
-
-	if !m.sftpTransferring && !m.sftpPreviewing {
-		if msg := m.renderStatusMsg(width); msg != "" {
-			b.WriteString(msg)
-			b.WriteString("\n")
-		}
 	}
 
 	if m.sftpRenaming {
