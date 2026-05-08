@@ -244,7 +244,7 @@ type Model struct {
 	sftpCursor       [2]int
 	sftpScroll       [2]int
 	sftpTransferring bool
-	sftpProgress     sftp.ProgressInfo
+	sftpProgress     *sftp.ProgressInfo
 	sftpPreview      string
 	sftpPreviewing   bool
 	sftpCancel       context.CancelFunc
@@ -484,14 +484,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.screen == ScreenSFTP && m.sftpDone != nil {
-			if m.sftpTransferring {
+			if m.sftpTransferring && m.sftpProgress != nil {
 				m.sftpProgress.Speed = (m.sftpProgress.Done - m.sftpPrevDone) * 2
 				m.sftpPrevDone = m.sftpProgress.Done
 			}
 			select {
 			case <-m.sftpDone:
 				m.sftpTransferring = false
-				m.sftpProgress.Active = false
+				if m.sftpProgress != nil {
+					m.sftpProgress.Active = false
+				}
 				m = m.refreshSFTPFiles()
 				m.sftpDone = nil
 			default:
@@ -1095,10 +1097,13 @@ func (m Model) renderStatusOverlay(width, height int) string {
 	}
 	boxStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FDE68A")).
-		Background(lipgloss.Color("#92400E")).
+		Background(lipgloss.Color("#78350F")).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#F59E0B")).
+		BorderBackground(lipgloss.Color("#78350F")).
 		Padding(0, 2)
 	box := boxStyle.Render(msg)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box, lipgloss.WithWhitespaceChars(" "), lipgloss.WithWhitespaceBackground(lipgloss.Color("#000000")))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m Model) renderShortcuts() string {
@@ -1424,7 +1429,7 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 		remotePath := m.sftpRemoteDir + "/" + entry.Name
 		m.sftpTransferring = true
 		m.sftpDirection = "↑"
-		m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+		m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
 		m.sftpPrevDone = 0
 		done := make(chan struct{})
 		m.sftpDone = done
@@ -1453,7 +1458,7 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
 	m.sftpTransferring = true
 	m.sftpDirection = "↓"
-	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
 	m.sftpPrevDone = 0
 	done := make(chan struct{})
 	m.sftpDone = done
@@ -1484,7 +1489,7 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 		remotePath := m.sftpRemoteDir + "/" + entry.Name
 		m.sftpTransferring = true
 		m.sftpDirection = "⇡"
-		m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Active: true}
+		m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
 		m.sftpPrevDone = 0
 		done := make(chan struct{})
 		m.sftpDone = done
@@ -1515,7 +1520,7 @@ func (m Model) sftpStartRecursive() (tea.Model, tea.Cmd) {
 	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
 	m.sftpTransferring = true
 	m.sftpDirection = "⇣"
-	m.sftpProgress = sftp.ProgressInfo{File: entry.Name, Active: true}
+	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
 	m.sftpPrevDone = 0
 	done := make(chan struct{})
 	m.sftpDone = done
@@ -1836,6 +1841,9 @@ func (m Model) renderSFTPPreview(width int) string {
 
 func (m Model) renderSFTPProgress(width int) string {
 	p := m.sftpProgress
+	if p == nil {
+		return ""
+	}
 	var pct float64
 	if p.Total > 0 {
 		pct = float64(p.Done) / float64(p.Total) * 100
