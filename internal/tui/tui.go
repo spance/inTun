@@ -529,7 +529,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePromptKeys(msg)
 	}
 
-	if m.screen == ScreenMain {
+	if m.screen == ScreenMain && msg.String() != "q" && msg.String() != "ctrl+c" {
 		m.quitConfirm = false
 	}
 
@@ -881,17 +881,24 @@ func (m Model) View() string {
 	content += m.renderShortcuts()
 
 	if overlay := m.renderStatusOverlay(width, m.height); overlay != "" {
-		content = lipgloss.Place(width, m.height, lipgloss.Center, lipgloss.Center, content, lipgloss.WithWhitespaceChars(" "))
-		lines := strings.Split(content, "\n")
+		contentLines := strings.Split(content, "\n")
 		overlayLines := strings.Split(overlay, "\n")
-		result := make([]string, 0, len(lines))
-		for i, line := range lines {
-			if i < len(overlayLines) && strings.TrimSpace(overlayLines[i]) != "" {
-				line = overlayLines[i]
-			}
-			result = append(result, line)
+		maxLines := len(contentLines)
+		if len(overlayLines) > maxLines {
+			maxLines = len(overlayLines)
 		}
-		content = strings.Join(result, "\n")
+		var sb strings.Builder
+		for i := 0; i < maxLines; i++ {
+			if i < len(overlayLines) && strings.TrimRight(overlayLines[i], " ") != "" {
+				sb.WriteString(overlayLines[i])
+			} else if i < len(contentLines) {
+				sb.WriteString(contentLines[i])
+			}
+			if i < maxLines-1 {
+				sb.WriteString("\n")
+			}
+		}
+		content = sb.String()
 	}
 
 	return content
@@ -1098,12 +1105,41 @@ func (m Model) renderStatusOverlay(width, height int) string {
 	boxStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FDE68A")).
 		Background(lipgloss.Color("#78350F")).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#F59E0B")).
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("#FBBF24")).
 		BorderBackground(lipgloss.Color("#78350F")).
 		Padding(0, 2)
 	box := boxStyle.Render(msg)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	boxW := lipgloss.Width(box)
+	boxH := lipgloss.Height(box)
+
+	row := m.height/2 - boxH/2
+	col := (width - boxW) / 2
+
+	var b strings.Builder
+	for y := 0; y < height; y++ {
+		if y == row {
+			leftPad := col
+			if leftPad > 0 {
+				b.WriteString(strings.Repeat(" ", leftPad))
+			}
+			boxLines := strings.Split(box, "\n")
+			for i, bl := range boxLines {
+				if i > 0 {
+					b.WriteString("\n")
+					leftPad = col
+					if leftPad > 0 {
+						b.WriteString(strings.Repeat(" ", leftPad))
+					}
+				}
+				b.WriteString(bl)
+			}
+			y += boxH - 1
+		} else {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 func (m Model) renderShortcuts() string {
