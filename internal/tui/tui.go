@@ -1118,80 +1118,61 @@ func (m Model) renderStatusOverlay(width, height int) string {
 }
 
 func renderDialogBox(width, height int, msg, hint string) string {
-	contentStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FDE68A")).
-		Background(lipgloss.Color("#78350F")).
-		Padding(0, 2)
+	boxBg := lipgloss.Color("#1E1E2E")
+	accentColor := lipgloss.Color("#89B4FA")
+	dimColor := lipgloss.Color("#6C7086")
+	textColor := lipgloss.Color("#CDD6F4")
+	labelColor := lipgloss.Color("#A6E3A1")
+
+	cardStyle := lipgloss.NewStyle().
+		Background(boxBg).
+		Padding(1, 3)
 
 	msgLines := strings.Split(msg, "\n")
-	styledMsgLines := make([]string, len(msgLines))
-	for i, ml := range msgLines {
-		styledMsgLines[i] = contentStyle.Render(ml)
+	var styledLines []string
+	for _, ml := range msgLines {
+		if strings.HasPrefix(ml, "FROM:") || strings.HasPrefix(ml, "TO:") {
+			parts := strings.SplitN(ml, ": ", 2)
+			if len(parts) == 2 {
+				label := lipgloss.NewStyle().Foreground(labelColor).Background(boxBg).Bold(true).Render(parts[0] + ":")
+				value := lipgloss.NewStyle().Foreground(textColor).Background(boxBg).Render(parts[1])
+				styledLines = append(styledLines, cardStyle.Render(label+" "+value))
+			} else {
+				styledLines = append(styledLines, cardStyle.Render(lipgloss.NewStyle().Foreground(textColor).Background(boxBg).Render(ml)))
+			}
+		} else {
+			styledLines = append(styledLines, cardStyle.Render(lipgloss.NewStyle().Foreground(textColor).Background(boxBg).Bold(true).Render(ml)))
+		}
 	}
 
-	var styledHint string
 	if hint != "" {
-		hintStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9CA3AF")).
-			Background(lipgloss.Color("#78350F"))
-		styledHint = hintStyle.Render(hint)
+		confirmBtn := lipgloss.NewStyle().Foreground(lipgloss.Color("#1E1E2E")).Background(accentColor).Padding(0, 2).Bold(true).Render("Enter Confirm")
+		cancelBtn := lipgloss.NewStyle().Foreground(dimColor).Background(boxBg).Padding(0, 1).Render("Esc Cancel")
+		btnRow := lipgloss.JoinHorizontal(lipgloss.Left, confirmBtn, " ", cancelBtn)
+		styledLines = append(styledLines, cardStyle.Render(lipgloss.NewStyle().Background(boxBg).PaddingTop(1).Render(btnRow)))
 	}
 
 	maxW := 0
-	for _, sl := range styledMsgLines {
+	for _, sl := range styledLines {
 		w := lipgloss.Width(sl)
 		if w > maxW {
 			maxW = w
 		}
 	}
-	if styledHint != "" {
-		w := lipgloss.Width(styledHint)
-		if w > maxW {
-			maxW = w
-		}
-	}
 
-	borderStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FBBF24")).
-		Background(lipgloss.Color("#78350F"))
-	hLine := strings.Repeat("-", maxW)
-
-	var boxLines []string
-	bgPad := lipgloss.NewStyle().Background(lipgloss.Color("#78350F"))
-
-	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
-	for _, sl := range styledMsgLines {
-		padW := maxW - lipgloss.Width(sl)
-		if padW > 0 {
-			sl += bgPad.Render(strings.Repeat(" ", padW))
-		}
-		boxLines = append(boxLines, borderStyle.Render("|")+sl+borderStyle.Render("|"))
-	}
-	if styledHint != "" {
-		boxLines = append(boxLines, borderStyle.Render("|")+bgPad.Render(strings.Repeat(" ", maxW))+borderStyle.Render("|"))
-		padW := maxW - lipgloss.Width(styledHint)
-		if padW > 0 {
-			styledHint += bgPad.Render(strings.Repeat(" ", padW))
-		}
-		boxLines = append(boxLines, borderStyle.Render("|")+styledHint+borderStyle.Render("|"))
-	}
-	boxLines = append(boxLines, borderStyle.Render("+"+hLine+"+"))
-
-	boxW := lipgloss.Width(boxLines[0])
-	boxH := len(boxLines)
-
+	boxH := len(styledLines)
 	row := height/2 - boxH/2
-	col := (width - boxW) / 2
+	col := (width - maxW) / 2
 
 	var b strings.Builder
 	for y := 0; y < height; y++ {
 		if y == row {
-			for bi, bl := range boxLines {
+			for bi, sl := range styledLines {
 				if col > 0 {
 					b.WriteString(strings.Repeat(" ", col))
 				}
-				b.WriteString(bl)
-				if bi < len(boxLines)-1 || y+bi < height-1 {
+				b.WriteString(sl)
+				if bi < len(styledLines)-1 {
 					b.WriteString("\n")
 				}
 			}
