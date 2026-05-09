@@ -891,7 +891,8 @@ func (m Model) View() string {
 		}
 		var sb strings.Builder
 		for i := 0; i < maxLines; i++ {
-			if i < len(overlayLines) && strings.TrimRight(overlayLines[i], " ") != "" {
+			useOverlay := i < len(overlayLines) && strings.Contains(overlayLines[i], "\x1b[")
+			if useOverlay {
 				sb.WriteString(overlayLines[i])
 			} else if i < len(contentLines) {
 				line := contentLines[i]
@@ -1105,7 +1106,7 @@ func (m Model) renderPrompt() string {
 
 func (m Model) renderStatusOverlay(width, height int) string {
 	if m.sftpSyncConfirm {
-		return renderDialogBox(width, height, m.sftpSyncConfirmMsg, "[Enter] Confirm  [Esc] Cancel")
+		return renderDialogBox(width, height, m.sftpSyncConfirmMsg, true)
 	}
 	if m.statusMsg == "" && !m.quitConfirm {
 		return ""
@@ -1114,55 +1115,85 @@ func (m Model) renderStatusOverlay(width, height int) string {
 	if m.quitConfirm {
 		msg = "Active tunnels running. Press q again to quit."
 	}
-	return renderDialogBox(width, height, msg, "")
+	return renderDialogBox(width, height, msg, false)
 }
 
-func renderDialogBox(width, height int, msg, hint string) string {
-	boxBg := lipgloss.Color("#1E1E2E")
-	accentColor := lipgloss.Color("#89B4FA")
-	dimColor := lipgloss.Color("#6C7086")
-	textColor := lipgloss.Color("#CDD6F4")
-	labelColor := lipgloss.Color("#A6E3A1")
-
-	cardStyle := lipgloss.NewStyle().
-		Background(boxBg).
-		Padding(1, 3)
+func renderDialogBox(width, height int, msg string, hasButtons bool) string {
+	boxBg := "\x1b[48;5;236m"
+	textFg := "\x1b[38;5;252m"
+	labelFg := "\x1b[38;2;166;227;161m\x1b[1m"
+	btnBg := "\x1b[48;5;75m\x1b[38;5;235m\x1b[1m"
+	dimFg := "\x1b[38;5;102m"
+	reset := "\x1b[0m"
 
 	msgLines := strings.Split(msg, "\n")
-	var styledLines []string
+
+	padX := 3
+	padY := 1
+	rawLines := make([]string, 0, len(msgLines)+padY*2+2)
+	for i := 0; i < padY; i++ {
+		rawLines = append(rawLines, "")
+	}
 	for _, ml := range msgLines {
-		if strings.HasPrefix(ml, "FROM:") || strings.HasPrefix(ml, "TO:") {
-			parts := strings.SplitN(ml, ": ", 2)
+		rawLines = append(rawLines, ml)
+	}
+	if hasButtons {
+		rawLines = append(rawLines, "")
+		rawLines = append(rawLines, "confirm cancel")
+	}
+	for i := 0; i < padY; i++ {
+		rawLines = append(rawLines, "")
+	}
+
+	maxRawW := 0
+	for _, rl := range rawLines {
+		if len(rl) > maxRawW {
+			maxRawW = len(rl)
+		}
+	}
+	innerW := maxRawW + padX*2
+
+	styledLines := make([]string, len(rawLines))
+	for i, rl := range rawLines {
+		padL := padX
+		padR := innerW - len(rl) - padX
+		if padR < padX {
+			padR = padX
+		}
+
+		if rl == "" {
+			styledLines[i] = boxBg + strings.Repeat(" ", innerW) + reset
+		} else if strings.HasPrefix(rl, "FROM:") || strings.HasPrefix(rl, "TO:") {
+			parts := strings.SplitN(rl, ": ", 2)
+			label := parts[0] + ":"
+			value := ""
 			if len(parts) == 2 {
-				label := lipgloss.NewStyle().Foreground(labelColor).Background(boxBg).Bold(true).Render(parts[0] + ":")
-				value := lipgloss.NewStyle().Foreground(textColor).Background(boxBg).Render(parts[1])
-				styledLines = append(styledLines, cardStyle.Render(label+" "+value))
-			} else {
-				styledLines = append(styledLines, cardStyle.Render(lipgloss.NewStyle().Foreground(textColor).Background(boxBg).Render(ml)))
+				value = parts[1]
 			}
+			content := labelFg + label + reset + " " + textFg + value + reset
+			padR = innerW - padX - len(label) - 1 - len(value) - padX
+			if padR < 0 {
+				padR = 0
+			}
+			styledLines[i] = boxBg + strings.Repeat(" ", padL) + content + boxBg + strings.Repeat(" ", padR) + reset
+		} else if rl == "confirm cancel" {
+			confirmStr := btnBg + " Enter Confirm " + reset
+			cancelStr := boxBg + dimFg + "  Esc Cancel" + boxBg + strings.Repeat(" ", padX) + reset
+			btnContent := confirmStr + cancelStr
+			styledLines[i] = boxBg + strings.Repeat(" ", padL) + btnContent + boxBg + strings.Repeat(" ", padR) + reset
 		} else {
-			styledLines = append(styledLines, cardStyle.Render(lipgloss.NewStyle().Foreground(textColor).Background(boxBg).Bold(true).Render(ml)))
+			padR = innerW - padX - len(rl) - padX
+			if padR < 0 {
+				padR = 0
+			}
+			styledLines[i] = boxBg + strings.Repeat(" ", padL) + textFg + "\x1b[1m" + rl + reset + boxBg + strings.Repeat(" ", padR) + reset
 		}
 	}
 
-	if hint != "" {
-		confirmBtn := lipgloss.NewStyle().Foreground(lipgloss.Color("#1E1E2E")).Background(accentColor).Padding(0, 2).Bold(true).Render("Enter Confirm")
-		cancelBtn := lipgloss.NewStyle().Foreground(dimColor).Background(boxBg).Padding(0, 1).Render("Esc Cancel")
-		btnRow := lipgloss.JoinHorizontal(lipgloss.Left, confirmBtn, " ", cancelBtn)
-		styledLines = append(styledLines, cardStyle.Render(lipgloss.NewStyle().Background(boxBg).PaddingTop(1).Render(btnRow)))
-	}
-
-	maxW := 0
-	for _, sl := range styledLines {
-		w := lipgloss.Width(sl)
-		if w > maxW {
-			maxW = w
-		}
-	}
-
+	boxW := lipgloss.Width(styledLines[0])
 	boxH := len(styledLines)
 	row := height/2 - boxH/2
-	col := (width - maxW) / 2
+	col := (width - boxW) / 2
 
 	var b strings.Builder
 	for y := 0; y < height; y++ {
