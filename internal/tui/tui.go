@@ -894,7 +894,14 @@ func (m Model) View() string {
 			if i < len(overlayLines) && strings.TrimRight(overlayLines[i], " ") != "" {
 				sb.WriteString(overlayLines[i])
 			} else if i < len(contentLines) {
-				sb.WriteString(contentLines[i])
+				line := contentLines[i]
+				lineW := lipgloss.Width(line)
+				if lineW < width {
+					line += strings.Repeat(" ", width-lineW)
+				}
+				sb.WriteString(line)
+			} else {
+				sb.WriteString(strings.Repeat(" ", width))
 			}
 			if i < maxLines-1 {
 				sb.WriteString("\n")
@@ -1161,6 +1168,7 @@ func renderDialogBox(width, height int, msg, hint string) string {
 		boxLines = append(boxLines, borderStyle.Render("|")+sl+borderStyle.Render("|"))
 	}
 	if styledHint != "" {
+		boxLines = append(boxLines, borderStyle.Render("|")+bgPad.Render(strings.Repeat(" ", maxW))+borderStyle.Render("|"))
 		padW := maxW - lipgloss.Width(styledHint)
 		if padW > 0 {
 			styledHint += bgPad.Render(strings.Repeat(" ", padW))
@@ -1178,14 +1186,17 @@ func renderDialogBox(width, height int, msg, hint string) string {
 	var b strings.Builder
 	for y := 0; y < height; y++ {
 		if y == row {
-			for _, bl := range boxLines {
+			for bi, bl := range boxLines {
 				if col > 0 {
 					b.WriteString(strings.Repeat(" ", col))
 				}
 				b.WriteString(bl)
-				b.WriteString("\n")
+				if bi < len(boxLines)-1 || y+bi < height-1 {
+					b.WriteString("\n")
+				}
 			}
 			y += boxH - 1
+			continue
 		}
 		if y < height-1 {
 			b.WriteString("\n")
