@@ -93,7 +93,7 @@ func (k *KnownHosts) VerifyHostKey(ctx *AuthContext, id int, host string, port s
 				if ctx == nil || ctx.RequestChan == nil {
 					return errors.New("HOST_KEY_UNKNOWN: no auth context")
 				}
-				return k.handleUnknownHost(ctx, id, host, key)
+				return k.handleUnknownHost(ctx, id, hostWithPort, key)
 			}
 		}
 
@@ -103,7 +103,7 @@ func (k *KnownHosts) VerifyHostKey(ctx *AuthContext, id int, host string, port s
 	if ctx == nil || ctx.RequestChan == nil {
 		return errors.New("HOST_KEY_UNKNOWN: no auth context")
 	}
-	return k.handleUnknownHost(ctx, id, host, key)
+	return k.handleUnknownHost(ctx, id, hostWithPort, key)
 }
 
 func (k *KnownHosts) handleUnknownHost(ctx *AuthContext, id int, hostname string, key ssh.PublicKey) error {

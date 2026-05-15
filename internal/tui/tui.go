@@ -912,7 +912,13 @@ func (m Model) renderPrompt() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(borderStyle.Render(" Auth Required "))
+	authTitle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#EF4444")).
+		Foreground(lipgloss.Color("#FFFFFF")).Bold(true).
+		Width(m.width - 2).
+		Padding(0, 1).
+		Render("Auth Required")
+	b.WriteString(authTitle)
 	b.WriteString("\n\n")
 
 	if current.Type == platform.AuthRequestHostKey {
