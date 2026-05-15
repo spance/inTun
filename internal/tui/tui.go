@@ -665,12 +665,20 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.inputMode == 0 {
-			m.localPort = m.portInput
+			if strings.Contains(m.portInput, ":") {
+				m.localPort = m.portInput
+			} else {
+				m.localPort = "127.0.0.1:" + m.portInput
+			}
 			m.portInput = ""
 			m.inputMode = 1
 			return m, nil
 		}
-		m.remotePort = m.portInput
+		if strings.Contains(m.portInput, ":") {
+			m.remotePort = m.portInput
+		} else {
+			m.remotePort = "127.0.0.1:" + m.portInput
+		}
 		m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, m.remotePort)
 		m.screen = ScreenMain
 		return m, nil
@@ -685,7 +693,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		ch := msg.String()
 		if len(ch) == 1 {
 			c := ch[0]
-			if m.selectedType == tunnel.Remote {
+			if m.selectedType == tunnel.Remote || m.selectedType == tunnel.Local {
 				if (c >= '0' && c <= '9') || c == '.' || c == ':' {
 					m.portInput += ch
 				}
@@ -892,11 +900,11 @@ func (m Model) renderPortInput() string {
 		}
 	} else {
 		if m.inputMode == 0 {
-			b.WriteString(fmt.Sprintf("Local Port: %s", m.portInput))
+			b.WriteString(fmt.Sprintf("Local Listen (ip:port or port): %s", m.portInput))
 			b.WriteString(shortcutStyle.Render("_"))
 		} else {
-			b.WriteString(fmt.Sprintf("Local Port: %s\n", m.localPort))
-			b.WriteString(fmt.Sprintf("Remote Port: %s", m.portInput))
+			b.WriteString(fmt.Sprintf("Local Listen: %s\n", m.localPort))
+			b.WriteString(fmt.Sprintf("Remote Target (ip:port or port): %s", m.portInput))
 			b.WriteString(shortcutStyle.Render("_"))
 		}
 	}

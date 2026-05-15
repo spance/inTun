@@ -381,7 +381,11 @@ func (e *SSHExecutor) handleKeyboardInteractive(authCtx *AuthContext, id int, us
 }
 
 func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePort string) {
-	listener, err := net.Listen("tcp", "127.0.0.1:"+localPort)
+	listenAddr := localPort
+	if !strings.Contains(listenAddr, ":") {
+		listenAddr = "127.0.0.1:" + listenAddr
+	}
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
 		if conn.client != nil {
@@ -425,7 +429,11 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteA
 }
 
 func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string) {
-	listener, err := net.Listen("tcp", "127.0.0.1:"+localPort)
+	listenAddr := localPort
+	if !strings.Contains(listenAddr, ":") {
+		listenAddr = "127.0.0.1:" + listenAddr
+	}
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
 		if conn.client != nil {
