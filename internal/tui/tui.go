@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	sftplib "github.com/pkg/sftp"
@@ -104,7 +106,7 @@ var (
 				Bold(true)
 
 	shortcutStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6B7280"))
+			Foreground(lipgloss.Color("#CDD6F4"))
 
 	keyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#F59E0B")).
@@ -112,6 +114,12 @@ var (
 
 	lineStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6B7280"))
+
+	dirStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#89B4FA"))
+
+	inactiveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#585B70"))
 )
 
 type AuthPromptQueue struct {
@@ -253,6 +261,7 @@ type Model struct {
 	sftpDone         chan struct{}
 	sftpDirection    string
 	sftpPrevDone     int64
+	sftpProgressBar  progress.Model
 	sftpRenaming       bool
 	sftpRenameInput    string
 	sftpSyncConfirm    bool
@@ -308,7 +317,7 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 	}
 	manager.SetAuthContext(authCtx)
 
-	return Model{
+	m := Model{
 		screen:        ScreenMain,
 		manager:       manager,
 		hosts:         hosts,
@@ -322,6 +331,10 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		width:         defaultWidth,
 		version:       version,
 	}
+
+	m.sftpProgressBar = progress.New(progress.WithScaledGradient("#7C3AED", "#F59E0B"), progress.WithoutPercentage(), progress.WithWidth(40))
+
+	return m
 }
 
 type hostItem struct {
@@ -487,8 +500,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == ScreenSFTP && m.sftpDone != nil {
 			if m.sftpTransferring && m.sftpProgress != nil {
-				m.sftpProgress.Speed = (m.sftpProgress.Done - m.sftpPrevDone) * 2
-				m.sftpPrevDone = m.sftpProgress.Done
+				doneNow := atomic.LoadInt64(&m.sftpProgress.Done)
+				m.sftpProgress.Speed = (doneNow - m.sftpPrevDone) * 2
+				m.sftpPrevDone = doneNow
 			}
 			select {
 			case <-m.sftpDone:
@@ -853,7 +867,12 @@ func (m Model) View() string {
 		title = title + strings.Repeat(" ", titlePadding)
 	}
 	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+
+	if m.screen == ScreenSFTP {
+		b.WriteString(m.renderSFTPTabBar(width))
+	}
+	b.WriteString("\n")
 
 	if m.promptMode {
 		b.WriteString(m.renderPrompt())
@@ -1087,7 +1106,13 @@ func (m Model) renderPrompt() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(borderStyle.Render(" Auth Required "))
+	authTitle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#EF4444")).
+		Foreground(lipgloss.Color("#FFFFFF")).Bold(true).
+		Width(m.width - 2).
+		Padding(0, 1).
+		Render("Auth Required")
+	b.WriteString(authTitle)
 	b.WriteString("\n\n")
 
 	if current.Type == platform.AuthRequestHostKey {
@@ -1124,69 +1149,64 @@ func renderDialogBox(width, height int, msg string, hasButtons bool) string {
 	labelFg := "\x1b[38;2;166;227;161m\x1b[1m"
 	btnBg := "\x1b[48;5;75m\x1b[38;5;235m\x1b[1m"
 	dimFg := "\x1b[38;5;102m"
+	bold := "\x1b[1m"
 	reset := "\x1b[0m"
 
-	msgLines := strings.Split(msg, "\n")
+	type dl struct{ plainW int; ansi string }
 
 	padX := 3
 	padY := 1
-	rawLines := make([]string, 0, len(msgLines)+padY*2+2)
+	var lines []dl
+
 	for i := 0; i < padY; i++ {
-		rawLines = append(rawLines, "")
+		lines = append(lines, dl{})
 	}
-	for _, ml := range msgLines {
-		rawLines = append(rawLines, ml)
-	}
-	if hasButtons {
-		rawLines = append(rawLines, "")
-		rawLines = append(rawLines, "confirm cancel")
-	}
-	for i := 0; i < padY; i++ {
-		rawLines = append(rawLines, "")
-	}
-
-	maxRawW := 0
-	for _, rl := range rawLines {
-		if len(rl) > maxRawW {
-			maxRawW = len(rl)
-		}
-	}
-	innerW := maxRawW + padX*2
-
-	styledLines := make([]string, len(rawLines))
-	for i, rl := range rawLines {
-		padL := padX
-		padR := innerW - len(rl) - padX
-		if padR < padX {
-			padR = padX
-		}
-
-		if rl == "" {
-			styledLines[i] = boxBg + strings.Repeat(" ", innerW) + reset
-		} else if strings.HasPrefix(rl, "FROM:") || strings.HasPrefix(rl, "TO:") {
-			parts := strings.SplitN(rl, ": ", 2)
+	for _, ml := range strings.Split(msg, "\n") {
+		trimmed := strings.TrimLeft(ml, " ")
+		if strings.HasPrefix(trimmed, "FROM:") || strings.HasPrefix(trimmed, "TO:") {
+			parts := strings.SplitN(trimmed, ": ", 2)
+			lead := len(ml) - len(trimmed)
 			label := parts[0] + ":"
 			value := ""
 			if len(parts) == 2 {
 				value = parts[1]
 			}
-			content := labelFg + label + reset + " " + textFg + value + reset
-			padR = innerW - padX - len(label) - 1 - len(value) - padX
-			if padR < 0 {
-				padR = 0
-			}
-			styledLines[i] = boxBg + strings.Repeat(" ", padL) + content + boxBg + strings.Repeat(" ", padR) + reset
-		} else if rl == "confirm cancel" {
-			confirmStr := btnBg + " Enter Confirm " + reset
-			cancelStr := boxBg + dimFg + "  Esc Cancel" + boxBg + strings.Repeat(" ", padX) + reset
-			btnContent := confirmStr + cancelStr
-			styledLines[i] = boxBg + strings.Repeat(" ", padL) + btnContent + boxBg + strings.Repeat(" ", padR) + reset
+			pw := lead + len(label) + 1 + len(value)
+			a := boxBg + strings.Repeat(" ", lead) + labelFg + label + reset + boxBg + " " + textFg + value + reset + boxBg
+			lines = append(lines, dl{pw, a})
 		} else {
-			padR = innerW - padX - len(rl) - padX
-			if padR < 0 {
-				padR = 0
+			lines = append(lines, dl{len(ml), boxBg + textFg + bold + ml + reset + boxBg})
+		}
+	}
+	if hasButtons {
+		lines = append(lines, dl{})
+		cp := "Enter Confirm"
+		ep := "  Esc Cancel"
+		pw := 1 + len(cp) + 1 + len(ep)
+		a := btnBg + " " + cp + " " + reset + boxBg + dimFg + ep + reset + boxBg
+		lines = append(lines, dl{pw, a})
+	}
+	for i := 0; i < padY; i++ {
+		lines = append(lines, dl{})
+	}
+
+	innerW := 0
+	for _, l := range lines {
+		if w := l.plainW + padX*2; w > innerW {
+			innerW = w
+		}
+	}
+
+	styledLines := make([]string, len(lines))
+	for i, l := range lines {
+		if l.plainW == 0 {
+			styledLines[i] = boxBg + strings.Repeat(" ", innerW) + reset
+		} else {
+			padR := innerW - padX - l.plainW
+			if padR < padX {
+				padR = padX
 			}
-			styledLines[i] = boxBg + strings.Repeat(" ", padL) + textFg + "\x1b[1m" + rl + reset + boxBg + strings.Repeat(" ", padR) + reset
+			styledLines[i] = boxBg + strings.Repeat(" ", padX) + l.ansi + strings.Repeat(" ", padR) + reset
 		}
 	}
 
@@ -1563,7 +1583,7 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 		client := m.sftpClient
 		go func() {
 			client.Upload(localPath, remotePath, func(n int64) {
-				m.sftpProgress.Done = n
+				atomic.StoreInt64(&m.sftpProgress.Done, n)
 			})
 			close(done)
 		}()
@@ -1592,7 +1612,7 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 	client := m.sftpClient
 	go func() {
 		client.Download(remotePath, localPath, func(n int64) {
-			m.sftpProgress.Done = n
+			atomic.StoreInt64(&m.sftpProgress.Done, n)
 		})
 		close(done)
 	}()
@@ -1622,7 +1642,7 @@ func (m Model) sftpStartRecursiveConfirm() (tea.Model, tea.Cmd) {
 	}
 
 	m.sftpSyncConfirm = true
-	m.sftpSyncConfirmMsg = fmt.Sprintf("FROM: %s\nTO:   %s", src, dst)
+	m.sftpSyncConfirmMsg = fmt.Sprintf("FROM: %s\n  TO: %s", src, dst)
 	return m, nil
 }
 
@@ -1648,8 +1668,8 @@ func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
 		client := m.sftpClient
 		go func() {
 			client.UploadDir(localPath, remotePath, func(done, total int64, file string) {
-				m.sftpProgress.Done = done
-				m.sftpProgress.Total = total
+				atomic.StoreInt64(&m.sftpProgress.Done, done)
+				atomic.StoreInt64(&m.sftpProgress.Total, total)
 				m.sftpProgress.File = file
 			})
 			close(done)
@@ -1667,7 +1687,7 @@ func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	remotePath := m.sftpRemoteDir + "/" + entry.Name
-	localPath := filepath.Join(m.sftpLocalDir + "/" + entry.Name)
+	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
 	m.sftpTransferring = true
 	m.sftpDirection = "⇣"
 	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
@@ -1677,8 +1697,8 @@ func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
 	client := m.sftpClient
 	go func() {
 		client.DownloadDir(remotePath, localPath, func(done, total int64, file string) {
-			m.sftpProgress.Done = done
-			m.sftpProgress.Total = total
+			atomic.StoreInt64(&m.sftpProgress.Done, done)
+			atomic.StoreInt64(&m.sftpProgress.Total, total)
 			m.sftpProgress.File = file
 		})
 		close(done)
@@ -1788,6 +1808,41 @@ func isBinaryContent(s string) bool {
 	return false
 }
 
+func (m Model) renderSFTPTabBar(width int) string {
+	half := width / 2
+
+	localLabel := " LOCAL "
+	remoteLabel := " REMOTE "
+
+	activeStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#7C3AED")).
+		Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+	inactiveStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#313244")).
+		Foreground(lipgloss.Color("#6C7086"))
+
+	var left, right string
+	if m.sftpFocus == 0 {
+		left = activeStyle.Render(localLabel)
+		right = inactiveStyle.Render(remoteLabel)
+	} else {
+		left = inactiveStyle.Render(localLabel)
+		right = activeStyle.Render(remoteLabel)
+	}
+
+	leftPad := half - lipgloss.Width(left)
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	rightPad := half - lipgloss.Width(right)
+	if rightPad < 0 {
+		rightPad = 0
+	}
+
+	return left + strings.Repeat(" ", leftPad) +
+		right + strings.Repeat(" ", rightPad)
+}
+
 func (m Model) renderSFTPScreen() string {
 	width := m.width
 	if width < minTermWidth {
@@ -1852,7 +1907,7 @@ func (m Model) renderSFTPScreen() string {
 	}
 
 	if m.sftpTransferring {
-		b.WriteString(m.renderSFTPProgress(panelWidth))
+		b.WriteString(m.renderSFTPProgress(width))
 		b.WriteString("\n")
 	}
 
@@ -1867,13 +1922,13 @@ func (m Model) renderSFTPScreen() string {
 func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width int, focused bool) string {
 	var b strings.Builder
 
-	hdrStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Bold(true)
+	hdrStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#585B70")).Bold(true)
 	if focused {
 		hdrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
 	}
 
-	dirDisplay := truncate(dir, width-len(label)-2)
-	hdrText := fmt.Sprintf("%s: %s", label, dirDisplay)
+	dirDisplay := truncate(dir, width-1)
+	hdrText := dirDisplay
 	visibleW := lipgloss.Width(hdrText)
 	padW := width - visibleW
 	if padW > 0 {
@@ -1925,7 +1980,7 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 
 		prefix := "  "
 		if i == cursor {
-			prefix = "▸ "
+			prefix = "❯ "
 		}
 
 		var line string
@@ -1955,13 +2010,21 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 			if linePad > 0 {
 				line += strings.Repeat(" ", linePad)
 			}
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render(line))
+			if isDir {
+				b.WriteString(dirStyle.Render(line))
+			} else {
+				b.WriteString(inactiveStyle.Render(line))
+			}
 		} else {
 			linePad := width - lipgloss.Width(line)
 			if linePad > 0 {
 				line += strings.Repeat(" ", linePad)
 			}
-			b.WriteString(shortcutStyle.Render(line))
+			if isDir {
+				b.WriteString(dirStyle.Render(line))
+			} else {
+				b.WriteString(shortcutStyle.Render(line))
+			}
 		}
 		b.WriteString("\n")
 		renderIdx++
@@ -1981,7 +2044,7 @@ func (m Model) renderSFTPPreview(width int) string {
 		lines = lines[:maxLines]
 	}
 
-	previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Width(width - 4)
+	previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Width(width - 4)
 	for _, line := range lines {
 		displayLine := truncate(line, width-4)
 		b.WriteString(previewStyle.Render(displayLine))
@@ -1997,25 +2060,29 @@ func (m Model) renderSFTPProgress(width int) string {
 		return ""
 	}
 	var pct float64
-	if p.Total > 0 {
-		pct = float64(p.Done) / float64(p.Total) * 100
+	doneNow := atomic.LoadInt64(&p.Done)
+	totalNow := atomic.LoadInt64(&p.Total)
+	if totalNow > 0 {
+		pct = float64(doneNow) / float64(totalNow)
+		if pct > 1 {
+			pct = 1
+		}
 	}
-	barWidth := width / 4
-	if barWidth < 10 {
-		barWidth = 10
-	}
-	filled := int(pct / 100 * float64(barWidth))
-	if filled > barWidth {
-		filled = barWidth
-	}
-
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 
 	var speedStr string
 	if p.Speed > 0 {
 		speedStr = " " + formatTransferSpeed(p.Speed)
 	}
 
-	progressStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-	return progressStyle.Render(fmt.Sprintf("%s %s [%s] %.0f%%%s", m.sftpDirection, p.File, bar, pct, speedStr))
+	barWidth := width - 6
+	if barWidth < 20 {
+		barWidth = 20
+	}
+	barModel := m.sftpProgressBar
+	barModel.Width = barWidth
+
+	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	infoLine := infoStyle.Render(fmt.Sprintf("%s %s %.0f%%%s", m.sftpDirection, p.File, pct*100, speedStr))
+
+	return infoLine + "\n" + barModel.ViewAs(pct)
 }
