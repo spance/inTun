@@ -381,10 +381,7 @@ func (e *SSHExecutor) handleKeyboardInteractive(authCtx *AuthContext, id int, us
 }
 
 func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePort string) {
-	listenAddr := localPort
-	if !strings.Contains(listenAddr, ":") {
-		listenAddr = "127.0.0.1:" + listenAddr
-	}
+	listenAddr := tcpForwardAddr(localPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
@@ -407,7 +404,7 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 }
 
 func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteAddr string) {
-	listener, err := conn.client.Listen("tcp", remoteAddr)
+	listener, err := conn.client.Listen("tcp", tcpForwardAddr(remoteAddr))
 	if err != nil {
 		conn.setError(fmt.Sprintf("REMOTE_LISTEN_FAILED: %v", err))
 		if conn.client != nil {
@@ -429,10 +426,7 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteA
 }
 
 func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string) {
-	listenAddr := localPort
-	if !strings.Contains(listenAddr, ":") {
-		listenAddr = "127.0.0.1:" + listenAddr
-	}
+	listenAddr := tcpForwardAddr(localPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
@@ -479,6 +473,13 @@ func expandPath(path string) string {
 	return path
 }
 
+func tcpForwardAddr(addr string) string {
+	if strings.Contains(addr, ":") {
+		return addr
+	}
+	return "127.0.0.1:" + addr
+}
+
 func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string) {
 	defer localConn.Close()
 
@@ -491,7 +492,7 @@ func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string
 		return
 	}
 
-	remoteConn, err := client.Dial("tcp", "127.0.0.1:"+remotePort)
+	remoteConn, err := client.Dial("tcp", tcpForwardAddr(remotePort))
 	if err != nil {
 		return
 	}
@@ -514,7 +515,7 @@ func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string
 func (c *SSHConnection) handleRemoteForward(remoteConn net.Conn, localAddr string) {
 	defer remoteConn.Close()
 
-	localConn, err := net.Dial("tcp", localAddr)
+	localConn, err := net.Dial("tcp", tcpForwardAddr(localAddr))
 	if err != nil {
 		return
 	}
