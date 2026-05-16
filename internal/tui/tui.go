@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -134,25 +137,26 @@ func (q *AuthPromptQueue) Poll() AuthRequest {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.current != nil && q.notified {
-		return AuthRequest{}
+	q.drainPendingLocked()
+	if q.current != nil && !q.notified {
+		q.notified = true
+		return *q.current
 	}
+	return AuthRequest{}
+}
 
-	select {
-	case req := <-q.requestChan:
-		if q.current == nil {
-			q.current = &req
-			q.notified = false
-			return req
+func (q *AuthPromptQueue) drainPendingLocked() {
+	for {
+		select {
+		case req := <-q.requestChan:
+			if q.current == nil {
+				q.current = &req
+			} else {
+				q.pending = append(q.pending, req)
+			}
+		default:
+			return
 		}
-		q.pending = append(q.pending, req)
-		return AuthRequest{}
-	default:
-		if q.current != nil && !q.notified {
-			q.notified = true
-			return *q.current
-		}
-		return AuthRequest{}
 	}
 }
 
@@ -160,6 +164,12 @@ func (q *AuthPromptQueue) Current() *AuthRequest {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.current
+}
+
+func (q *AuthPromptQueue) PendingCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.pending)
 }
 
 func (q *AuthPromptQueue) Complete(resp AuthResponse) {
@@ -184,11 +194,14 @@ func (q *AuthPromptQueue) CancelAll(id int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	q.drainPendingLocked()
+
 	if q.current != nil && q.current.ID == id {
 		if q.current.Response != nil {
 			q.current.Response <- AuthResponse{Accept: false}
 		}
 		q.current = nil
+		q.notified = false
 	}
 
 	newPending := make([]AuthRequest, 0)
@@ -224,6 +237,7 @@ type Model struct {
 	authQueue     *AuthPromptQueue
 	promptMode    bool
 	promptInput   string
+	confirmQuit   bool
 	authCtx       *platform.AuthContext
 	cancelCtx     context.Context
 	cancelFunc    context.CancelFunc
@@ -324,8 +338,8 @@ func newHostDelegate() hostDelegate {
 	return hostDelegate{styles: list.NewDefaultItemStyles()}
 }
 
-func (d hostDelegate) Height() int  { return 2 }
-func (d hostDelegate) Spacing() int { return 1 }
+func (d hostDelegate) Height() int                             { return 2 }
+func (d hostDelegate) Spacing() int                            { return 1 }
 func (d hostDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d hostDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
@@ -353,9 +367,9 @@ func (d hostDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	if len(h.host.Labels) > 0 {
 		labelStr := strings.Join(h.host.Labels, ", ")
 		if selected {
-			title = titleStyle.Render(host + " # ") + labelSelectedStyle.Render(labelStr)
+			title = titleStyle.Render(host+" # ") + labelSelectedStyle.Render(labelStr)
 		} else {
-			title = titleStyle.Render(host + " # ") + labelHighlightStyle.Render(labelStr)
+			title = titleStyle.Render(host+" # ") + labelHighlightStyle.Render(labelStr)
 		}
 	} else {
 		title = titleStyle.Render(host)
@@ -416,29 +430,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		listHeight := msg.Height - 8
-		if listHeight > hostListHeight {
-			listHeight = hostListHeight
-		}
-		if listHeight < 5 {
-			listHeight = 5
-		}
-		m.hostList.SetSize(msg.Width-4, listHeight)
-		m.typeList.SetSize(msg.Width-4, min(typeListHeight, msg.Height-8))
+		listWidth, listHeight := listDimensions(msg.Width, msg.Height, hostListHeight)
+		typeWidth, typeHeight := listDimensions(msg.Width, msg.Height, typeListHeight)
+		m.hostList.SetSize(listWidth, listHeight)
+		m.typeList.SetSize(typeWidth, typeHeight)
 		return m, nil
 	case sizeMsg:
 		if msg.width != m.width || msg.height != m.height {
 			m.width = msg.width
 			m.height = msg.height
-			listHeight := msg.height - 8
-			if listHeight > 30 {
-				listHeight = 30
-			}
-			if listHeight < 5 {
-				listHeight = 5
-			}
-			m.hostList.SetSize(msg.width-4, listHeight)
-			m.typeList.SetSize(msg.width-4, min(12, msg.height-8))
+			listWidth, listHeight := listDimensions(msg.width, msg.height, hostListHeight)
+			typeWidth, typeHeight := listDimensions(msg.width, msg.height, typeListHeight)
+			m.hostList.SetSize(listWidth, listHeight)
+			m.typeList.SetSize(typeWidth, typeHeight)
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -473,6 +477,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.promptMode {
 		return m.handlePromptKeys(msg)
 	}
+	if m.confirmQuit {
+		return m.handleQuitConfirmKeys(msg)
+	}
 
 	switch m.screen {
 	case ScreenMain:
@@ -483,6 +490,17 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleTypeSelectKeys(msg)
 	case ScreenInputPort:
 		return m.handlePortInputKeys(msg)
+	}
+	return m, nil
+}
+
+func (m Model) handleQuitConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "y", "q", "e", "ctrl+c":
+		return m, tea.Quit
+	case "esc", "n":
+		m.confirmQuit = false
+		return m, nil
 	}
 	return m, nil
 }
@@ -540,6 +558,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("no hosts found in ~/.ssh/config")
 			return m, nil
 		}
+		m.err = nil
 		m.screen = ScreenSelectHost
 		return m, nil
 	case "y":
@@ -578,9 +597,23 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectedIndex++
 		}
 	case "e", "q", "ctrl+c":
+		if m.hasLiveTunnels() {
+			m.confirmQuit = true
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m Model) hasLiveTunnels() bool {
+	for _, t := range m.manager.List() {
+		status := t.GetStatus()
+		if status == tunnel.StatusRunning || status == tunnel.StatusConnecting {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -639,6 +672,11 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if m.selectedType == tunnel.Dynamic {
+			if !validPortInput(m.portInput, false) {
+				m.err = fmt.Errorf("invalid SOCKS proxy port: %s", m.portInput)
+				return m, nil
+			}
+			m.err = nil
 			m.localPort = m.portInput
 			m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, "")
 			m.screen = ScreenMain
@@ -646,6 +684,11 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.selectedType == tunnel.Remote {
 			if m.inputMode == 0 {
+				if !validPortInput(m.portInput, true) {
+					m.err = fmt.Errorf("invalid local target: %s", m.portInput)
+					return m, nil
+				}
+				m.err = nil
 				if strings.Contains(m.portInput, ":") {
 					m.localPort = m.portInput
 				} else {
@@ -655,6 +698,11 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.inputMode = 1
 				return m, nil
 			}
+			if !validPortInput(m.portInput, true) {
+				m.err = fmt.Errorf("invalid remote listen: %s", m.portInput)
+				return m, nil
+			}
+			m.err = nil
 			if strings.Contains(m.portInput, ":") {
 				m.remotePort = m.portInput
 			} else {
@@ -665,6 +713,11 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.inputMode == 0 {
+			if !validPortInput(m.portInput, true) {
+				m.err = fmt.Errorf("invalid local listen: %s", m.portInput)
+				return m, nil
+			}
+			m.err = nil
 			if strings.Contains(m.portInput, ":") {
 				m.localPort = m.portInput
 			} else {
@@ -674,6 +727,11 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.inputMode = 1
 			return m, nil
 		}
+		if !validPortInput(m.portInput, true) {
+			m.err = fmt.Errorf("invalid remote target: %s", m.portInput)
+			return m, nil
+		}
+		m.err = nil
 		if strings.Contains(m.portInput, ":") {
 			m.remotePort = m.portInput
 		} else {
@@ -690,15 +748,12 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.portInput = string([]rune(m.portInput)[:len([]rune(m.portInput))-1])
 		}
 	default:
-		ch := msg.String()
-		if len(ch) == 1 {
-			c := ch[0]
-			if m.selectedType == tunnel.Remote || m.selectedType == tunnel.Local {
-				if (c >= '0' && c <= '9') || c == '.' || c == ':' {
-					m.portInput += ch
+		if msg.Type == tea.KeyRunes {
+			allowAddr := m.selectedType == tunnel.Remote || m.selectedType == tunnel.Local
+			for _, r := range msg.Runes {
+				if validPortInputRune(r, allowAddr) {
+					m.portInput += string(r)
 				}
-			} else if c >= '0' && c <= '9' {
-				m.portInput += ch
 			}
 		}
 	}
@@ -708,21 +763,21 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var b strings.Builder
 
-	width := m.width
-	if 	width < minTermWidth {
-		width = 80
-	}
+	width := renderWidth(m.width)
+	height := renderHeight(m.height)
 
 	title := fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
-	titlePadding := width - lipgloss.Width(title)
+	titleInnerWidth := width - 2
+	title = truncate(title, titleInnerWidth)
+	titlePadding := titleInnerWidth - lipgloss.Width(title)
 	if titlePadding > 0 {
 		title = title + strings.Repeat(" ", titlePadding)
 	}
 	b.WriteString(titleStyle.Render(title))
 	b.WriteString("\n\n")
 
-	if m.promptMode {
-		b.WriteString(m.renderPrompt())
+	if m.err != nil {
+		b.WriteString(errorStyle.Render("Error: " + truncate(m.err.Error(), width-7)))
 		b.WriteString("\n\n")
 	}
 
@@ -739,12 +794,19 @@ func (m Model) View() string {
 
 	content := b.String()
 	lines := strings.Count(content, "\n")
-	remainingLines := m.height - lines - 1
+	remainingLines := height - lines - 1
 	if remainingLines > 0 {
 		content += strings.Repeat("\n", remainingLines)
 	}
 
-	return content + m.renderShortcuts()
+	view := content + m.renderShortcuts()
+	if m.promptMode {
+		return overlayCentered(view, m.renderPromptModal(width), width, height)
+	}
+	if m.confirmQuit {
+		return overlayCentered(view, m.renderQuitConfirmModal(width), width, height)
+	}
+	return view
 }
 
 func (m Model) renderMainScreen() string {
@@ -757,21 +819,16 @@ func (m Model) renderMainScreen() string {
 		return b.String()
 	}
 
-	lineWidth := m.width
-	if 	lineWidth < minTermWidth {
-		lineWidth = 80
-	}
-
+	lineWidth := renderWidth(m.width)
+	layout := newTableLayout(lineWidth)
 	separator := strings.Repeat("=", lineWidth)
 
-	fixedWidth := colFixedWidth
-	nameWidth := lineWidth - fixedWidth
-	if nameWidth < 10 {
-		nameWidth = 10
-	}
-
-	header := fmt.Sprintf("  %-4s %-*s   %-13s %-10s %-21s %-21s %-8s",
-		"#", nameWidth, "Name", "Status", "Type", "Local", "Remote", "Latency")
+	header := fmt.Sprintf("  %-4s %-*s   %-13s %-*s %-*s %-*s %-*s",
+		"#", layout.nameW, "Name", "Status",
+		layout.typeW, "Type",
+		layout.addrW, "Local",
+		layout.addrW, "Remote",
+		layout.latencyW, "Latency")
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 	b.WriteString(lineStyle.Render(separator))
@@ -799,8 +856,9 @@ func (m Model) renderMainScreen() string {
 		if t.Type == tunnel.Dynamic {
 			remote = "SOCKS5"
 		} else if t.RemotePort != "" {
-			remote = ":" + t.RemotePort
+			remote = formatTunnelAddr(t.RemotePort)
 		}
+		local := formatTunnelAddr(t.LocalPort)
 
 		latency := "-"
 		if t.Latency > 0 {
@@ -820,17 +878,23 @@ func (m Model) renderMainScreen() string {
 		}
 
 		if i == m.selectedIndex {
-			plainPart := fmt.Sprintf("%s%-4d %-*s   ", prefix, t.ID, nameWidth, truncate(t.Name, nameWidth))
-			afterBadge := fmt.Sprintf(" %-10s %-21s %-21s %-8s",
-				t.Type.String(), ":"+t.LocalPort, remote, latency)
+			plainPart := fmt.Sprintf("%s%-4d %-*s   ", prefix, t.ID, layout.nameW, truncate(t.Name, layout.nameW))
+			afterBadge := fmt.Sprintf(" %-*s %-*s %-*s %-*s",
+				layout.typeW, truncate(t.Type.String(), layout.typeW),
+				layout.addrW, truncate(local, layout.addrW),
+				layout.addrW, truncate(remote, layout.addrW),
+				layout.latencyW, truncate(latency, layout.latencyW))
 			b.WriteString(selectedStyle.Render(plainPart))
 			b.WriteString(badge)
 			b.WriteString(badgePad)
 			b.WriteString(selectedStyle.Render(afterBadge))
 		} else {
-			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-10s %-21s %-21s %-8s",
-				prefix, t.ID, nameWidth, truncate(t.Name, nameWidth), badge, badgePad,
-				t.Type.String(), ":"+t.LocalPort, remote, latency)
+			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-*s %-*s %-*s %-*s",
+				prefix, t.ID, layout.nameW, truncate(t.Name, layout.nameW), badge, badgePad,
+				layout.typeW, truncate(t.Type.String(), layout.typeW),
+				layout.addrW, truncate(local, layout.addrW),
+				layout.addrW, truncate(remote, layout.addrW),
+				layout.latencyW, truncate(latency, layout.latencyW))
 			b.WriteString(line)
 		}
 		b.WriteString("\n")
@@ -913,41 +977,81 @@ func (m Model) renderPortInput() string {
 	return b.String()
 }
 
-func (m Model) renderPrompt() string {
+func (m Model) renderPromptModal(width int) ModalView {
 	current := m.authQueue.Current()
 	if current == nil {
-		return ""
+		return ModalView{}
+	}
+
+	modalWidth := min(64, width-8)
+	if modalWidth < 40 {
+		modalWidth = width - 4
+	}
+	contentWidth := modalWidth - 6
+
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().
+		Background(lipgloss.Color("#EF4444")).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Bold(true).
+		Padding(0, 1).
+		Render("Auth Required"))
+	b.WriteString("\n")
+
+	if current.Type == platform.AuthRequestHostKey {
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render("Unknown host key"))
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("Host        %s\n", selectedStyle.Render(truncate(current.Host, contentWidth-12))))
+		b.WriteString(fmt.Sprintf("Fingerprint %s\n", truncate(current.Fingerprint, contentWidth-12)))
+		b.WriteString("\n")
+		b.WriteString(shortcutStyle.Render("[A] Accept    [R] Reject"))
+	} else {
+		attempt := current.RetryCount + 1
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render(fmt.Sprintf("Password required  attempt %d/3", attempt)))
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("Host %s\n", selectedStyle.Render(truncate(current.Host, contentWidth-6))))
+		mask := strings.Repeat("*", len([]rune(m.promptInput)))
+		b.WriteString(fmt.Sprintf("[%s]\n\n", truncate(mask, contentWidth-2)))
+		b.WriteString(shortcutStyle.Render("[Enter] Submit    [Esc] Cancel"))
+	}
+	if pending := m.authQueue.PendingCount(); pending > 0 {
+		b.WriteString("\n")
+		b.WriteString(shortcutStyle.Render(fmt.Sprintf("%d more auth request(s) queued", pending)))
+	}
+
+	return renderModal(width, b.String(), modalWidth)
+}
+
+func (m Model) renderQuitConfirmModal(width int) ModalView {
+	liveCount := 0
+	for _, t := range m.manager.List() {
+		status := t.GetStatus()
+		if status == tunnel.StatusRunning || status == tunnel.StatusConnecting {
+			liveCount++
+		}
 	}
 
 	var b strings.Builder
-	authTitle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#EF4444")).
-		Foreground(lipgloss.Color("#FFFFFF")).Bold(true).
-		Width(m.width - 2).
+	b.WriteString(lipgloss.NewStyle().
+		Background(lipgloss.Color("#F59E0B")).
+		Foreground(lipgloss.Color("#000000")).
+		Bold(true).
 		Padding(0, 1).
-		Render("Auth Required")
-	b.WriteString(authTitle)
+		Render("Confirm Exit"))
 	b.WriteString("\n\n")
+	b.WriteString(headerStyle.Render("Active tunnels are still running"))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("%d live tunnel(s) will be closed when inTun exits.\n", liveCount))
+	b.WriteString("\n")
+	b.WriteString(shortcutStyle.Render("[Enter/Y/Q] Exit    [Esc/N] Cancel"))
 
-	if current.Type == platform.AuthRequestHostKey {
-		b.WriteString(fmt.Sprintf("Unknown host key for: %s\n", current.Host))
-		b.WriteString(fmt.Sprintf("Fingerprint: %s\n\n", current.Fingerprint))
-		b.WriteString(shortcutStyle.Render("[A] Accept  [R] Reject"))
-	} else {
-		attempt := current.RetryCount + 1
-		b.WriteString(fmt.Sprintf("Password for %s (attempt %d/3):\n", current.Host, attempt))
-		b.WriteString(fmt.Sprintf("[%s]\n\n", strings.Repeat("*", len([]rune(m.promptInput)))))
-		b.WriteString(shortcutStyle.Render("[Enter] Submit  [Esc] Cancel"))
-	}
-
-	return b.String()
+	return renderModal(width, b.String(), 56)
 }
 
 func (m Model) renderShortcuts() string {
-	width := m.width
-	if 	width < minTermWidth {
-		width = 80
-	}
+	width := renderWidth(m.width)
 
 	var items []string
 	switch m.screen {
@@ -1007,6 +1111,9 @@ func (m Model) renderShortcuts() string {
 }
 
 func truncate(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
@@ -1015,6 +1122,258 @@ func truncate(s string, max int) string {
 		return string(runes[:max])
 	}
 	return string(runes[:max-3]) + "..."
+}
+
+type tableLayout struct {
+	nameW    int
+	typeW    int
+	addrW    int
+	latencyW int
+}
+
+func newTableLayout(width int) tableLayout {
+	width = renderWidth(width)
+	layout := tableLayout{
+		nameW:    10,
+		typeW:    8,
+		addrW:    colAddrW,
+		latencyW: 7,
+	}
+
+	fixedWithoutNameAndAddr := 2 + colIDW + 1 + 3 + colStatusW + 1 + layout.typeW + 1 + 1 + 1 + layout.latencyW
+	remaining := width - fixedWithoutNameAndAddr
+	layout.addrW = min(colAddrW, (remaining-layout.nameW)/2)
+	if layout.addrW < 10 {
+		layout.addrW = 10
+	}
+	layout.nameW = remaining - 2*layout.addrW
+	if layout.nameW < 10 {
+		deficit := 10 - layout.nameW
+		layout.addrW -= (deficit + 1) / 2
+		if layout.addrW < 8 {
+			layout.addrW = 8
+		}
+		layout.nameW = remaining - 2*layout.addrW
+	}
+	return layout
+}
+
+func renderWidth(width int) int {
+	if width < minTermWidth {
+		return minTermWidth
+	}
+	return width
+}
+
+func renderHeight(height int) int {
+	if height <= 0 {
+		return defaultHeight
+	}
+	return height
+}
+
+type ModalView struct {
+	content string
+	width   int
+}
+
+func (m ModalView) String() string {
+	return m.content
+}
+
+func overlayCentered(base string, modal ModalView, width, height int) string {
+	if modal.content == "" {
+		return base
+	}
+
+	lines := strings.Split(base, "\n")
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+
+	modalLines := strings.Split(modal.content, "\n")
+	top := (height - len(modalLines)) / 2
+	if top < 0 {
+		top = 0
+	}
+	left := (width - modal.width) / 2
+	if left < 0 {
+		left = 0
+	}
+	prefix := strings.Repeat(" ", left)
+
+	for i, modalLine := range modalLines {
+		row := top + i
+		if row >= len(lines) {
+			break
+		}
+		lines[row] = prefix + modalLine
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func renderModal(screenWidth int, body string, modalWidth int) ModalView {
+	if modalWidth <= 0 {
+		modalWidth = min(64, screenWidth-8)
+	}
+	maxWidth := screenWidth - 4
+	if modalWidth > maxWidth {
+		modalWidth = maxWidth
+	}
+	if modalWidth < 40 {
+		modalWidth = screenWidth - 4
+	}
+
+	contentWidth := modalWidth - 4
+	border := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	lines := []string{
+		border.Render("╭" + strings.Repeat("─", modalWidth-2) + "╮"),
+		border.Render("│") + " " + strings.Repeat(" ", contentWidth) + " " + border.Render("│"),
+	}
+	for _, line := range strings.Split(body, "\n") {
+		lines = append(lines, border.Render("│")+" "+fitLine(line, contentWidth)+" "+border.Render("│"))
+	}
+	lines = append(lines,
+		border.Render("│")+" "+strings.Repeat(" ", contentWidth)+" "+border.Render("│"),
+		border.Render("╰"+strings.Repeat("─", modalWidth-2)+"╯"),
+	)
+	return ModalView{
+		content: strings.Join(lines, "\n"),
+		width:   modalWidth,
+	}
+}
+
+func centerLine(line string, width int) string {
+	lineWidth := lipgloss.Width(line)
+	if lineWidth >= width {
+		return line
+	}
+	left := (width - lineWidth) / 2
+	right := width - lineWidth - left
+	return strings.Repeat(" ", left) + line + strings.Repeat(" ", right)
+}
+
+func fitLine(line string, width int) string {
+	if lipgloss.Width(line) > width {
+		line = truncateANSI(line, width)
+	}
+	padding := width - lipgloss.Width(line)
+	if padding > 0 {
+		line += strings.Repeat(" ", padding)
+	}
+	return line
+}
+
+func truncateANSI(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= max {
+		return s
+	}
+
+	limit := max
+	suffix := ""
+	if max > 3 {
+		limit = max - 3
+		suffix = "..."
+	}
+
+	var b strings.Builder
+	visible := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				j++
+				for j < len(s) {
+					c := s[j]
+					j++
+					if c >= '@' && c <= '~' {
+						break
+					}
+				}
+				b.WriteString(s[i:j])
+				i = j
+				continue
+			}
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+		if visible >= limit {
+			break
+		}
+		b.WriteRune(r)
+		visible++
+		i += size
+	}
+	if suffix != "" {
+		b.WriteString("\x1b[0m")
+		b.WriteString(suffix)
+	}
+	return b.String()
+}
+
+func listDimensions(width, height, maxHeight int) (int, int) {
+	listWidth := width - 4
+	if listWidth < 20 {
+		listWidth = 20
+	}
+
+	listHeight := height - 8
+	if listHeight > maxHeight {
+		listHeight = maxHeight
+	}
+	if listHeight < 5 {
+		listHeight = 5
+	}
+	return listWidth, listHeight
+}
+
+func formatTunnelAddr(addr string) string {
+	if addr == "" {
+		return "-"
+	}
+	if strings.Contains(addr, ":") {
+		return addr
+	}
+	return ":" + addr
+}
+
+func validPortInput(input string, allowAddr bool) bool {
+	if input == "" {
+		return false
+	}
+	if !strings.Contains(input, ":") {
+		return validPort(input)
+	}
+	if !allowAddr {
+		return false
+	}
+	host, port, err := net.SplitHostPort(input)
+	if err != nil || host == "" {
+		return false
+	}
+	return validPort(port)
+}
+
+func validPortInputRune(r rune, allowAddr bool) bool {
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	return allowAddr && (r == '.' || r == ':')
+}
+
+func validPort(port string) bool {
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0 && n <= 65535
 }
 
 func formatBytes(b int64) string {

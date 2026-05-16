@@ -154,6 +154,94 @@ func TestModelPortInput(t *testing.T) {
 	}
 }
 
+func TestModelPortInputPasteAddress(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	m = updateModel(m, keyMsg("c"))
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyEnter())
+
+	m = updateModel(m, keyMsg("127.0.0.1:5555"))
+	if m.portInput != "127.0.0.1:5555" {
+		t.Fatalf("local listen paste portInput = %q, want %q", m.portInput, "127.0.0.1:5555")
+	}
+
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyMsg("10.0.0.15:5551"))
+	if m.portInput != "10.0.0.15:5551" {
+		t.Fatalf("remote target paste portInput = %q, want %q", m.portInput, "10.0.0.15:5551")
+	}
+}
+
+func TestModelDynamicPortInputPasteFiltersAddress(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	m = updateModel(m, keyMsg("c"))
+	m = updateModel(m, keyEnter())
+
+	for i := 0; i < 2; i++ {
+		m = updateModel(m, keyDown())
+	}
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyMsg("127.0.0.1:1080"))
+
+	if m.portInput != "1270011080" {
+		t.Fatalf("dynamic paste portInput = %q, want only digits", m.portInput)
+	}
+}
+
+func TestModelRejectsEmptyPortInput(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	m = updateModel(m, keyMsg("c"))
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyEnter())
+
+	if m.screen != ScreenInputPort {
+		t.Errorf("screen = %v, want ScreenInputPort", m.screen)
+	}
+	if m.err == nil {
+		t.Fatal("empty port input should set an error")
+	}
+	if got := len(m.manager.List()); got != 0 {
+		t.Fatalf("tunnel count = %d, want 0", got)
+	}
+}
+
+func TestValidPortInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		allowAddr bool
+		want      bool
+	}{
+		{name: "plain port", input: "5555", allowAddr: true, want: true},
+		{name: "host port", input: "10.0.0.15:5551", allowAddr: true, want: true},
+		{name: "empty", input: "", allowAddr: true, want: false},
+		{name: "missing port", input: "127.0.0.1:", allowAddr: true, want: false},
+		{name: "out of range", input: "70000", allowAddr: true, want: false},
+		{name: "dynamic rejects host", input: "127.0.0.1:1080", allowAddr: false, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validPortInput(tt.input, tt.allowAddr); got != tt.want {
+				t.Fatalf("validPortInput(%q, %v) = %v, want %v", tt.input, tt.allowAddr, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModelDynamicTunnelPortInput(t *testing.T) {
 	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
 	m := newTestModel(hosts)
@@ -189,6 +277,59 @@ func TestModelQuit(t *testing.T) {
 	_, cmd := m.Update(keyMsg("q"))
 	if cmd == nil {
 		t.Error("'q' key should trigger quit command")
+	}
+}
+
+func TestModelQuitConfirmsWithLiveTunnel(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
+	m.manager.Create("live-tunnel", cfg, tunnel.Local, "8080", "80")
+
+	result, cmd := m.Update(keyMsg("q"))
+	m = result.(Model)
+	if cmd != nil {
+		t.Fatal("'q' with a live tunnel should open confirmation instead of quitting immediately")
+	}
+	if !m.confirmQuit {
+		t.Fatal("confirmQuit should be true with a live tunnel")
+	}
+
+	result, cmd = m.Update(keyEsc())
+	m = result.(Model)
+	if cmd != nil {
+		t.Fatal("Esc should cancel quit confirmation, not quit")
+	}
+	if m.confirmQuit {
+		t.Fatal("confirmQuit should be false after Esc")
+	}
+
+	result, cmd = m.Update(keyMsg("q"))
+	m = result.(Model)
+	if !m.confirmQuit {
+		t.Fatal("confirmQuit should reopen on q")
+	}
+
+	_, cmd = m.Update(keyMsg("q"))
+	if cmd == nil {
+		t.Fatal("second q should confirm quit")
+	}
+}
+
+func TestModelQuitDoesNotConfirmStoppedTunnel(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+
+	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
+	tun, _ := m.manager.Create("stopped-tunnel", cfg, tunnel.Local, "8080", "80")
+	m.manager.Stop(tun.ID)
+
+	_, cmd := m.Update(keyMsg("q"))
+	if cmd == nil {
+		t.Fatal("'q' with only stopped tunnels should quit immediately")
 	}
 }
 
@@ -316,6 +457,53 @@ func TestAuthPromptQueueBasic(t *testing.T) {
 	}
 }
 
+func TestAuthPromptQueuePollDoesNotRepeatCurrent(t *testing.T) {
+	q := NewAuthPromptQueue()
+
+	req := platform.AuthRequest{
+		ID:       1,
+		Type:     platform.AuthRequestPassword,
+		Host:     "user@example.com",
+		Response: make(chan platform.AuthResponse, 1),
+	}
+
+	q.requestChan <- req
+	first := q.Poll()
+	if first.Response == nil {
+		t.Fatal("first Poll should return request")
+	}
+
+	second := q.Poll()
+	if second.Response != nil {
+		t.Fatal("second Poll should not return the same request again")
+	}
+}
+
+func TestAuthPromptQueueQueuesWhileCurrentActive(t *testing.T) {
+	q := NewAuthPromptQueue()
+
+	req1 := platform.AuthRequest{ID: 1, Host: "one@example.com", Response: make(chan platform.AuthResponse, 1)}
+	req2 := platform.AuthRequest{ID: 2, Host: "two@example.com", Response: make(chan platform.AuthResponse, 1)}
+
+	q.requestChan <- req1
+	if got := q.Poll(); got.Host != req1.Host {
+		t.Fatalf("first Poll host = %q, want %q", got.Host, req1.Host)
+	}
+
+	q.requestChan <- req2
+	if got := q.Poll(); got.Response != nil {
+		t.Fatal("Poll should not surface a second request while current is active")
+	}
+	if pending := q.PendingCount(); pending != 1 {
+		t.Fatalf("pending count = %d, want 1", pending)
+	}
+
+	q.Complete(platform.AuthResponse{Accept: true})
+	if got := q.Poll(); got.Host != req2.Host {
+		t.Fatalf("queued Poll host = %q, want %q", got.Host, req2.Host)
+	}
+}
+
 func TestAuthPromptQueueCancelAll(t *testing.T) {
 	q := NewAuthPromptQueue()
 
@@ -344,6 +532,15 @@ func TestAuthPromptQueueCancelAll(t *testing.T) {
 		}
 	default:
 		t.Error("current request should receive cancel response")
+	}
+
+	select {
+	case resp := <-respChan2:
+		if resp.Accept {
+			t.Error("queued cancelled response should have Accept = false")
+		}
+	default:
+		t.Error("queued request should receive cancel response")
 	}
 }
 
