@@ -259,3 +259,22 @@ func (t *Tunnel) setStatus(status Status, errMsg string) {
 	t.Error = errMsg
 	t.mu.Unlock()
 }
+
+func (m *Manager) GetSFTPClient(id int) (interface{}, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, t := range m.Tunnels {
+		if t.ID == id {
+			if t.GetStatus() != StatusRunning {
+				return nil, fmt.Errorf("tunnel %d is not running", id)
+			}
+			sc, ok := t.Conn.(platform.SFTPCapable)
+			if !ok {
+				return nil, fmt.Errorf("tunnel %d does not support SFTP", id)
+			}
+			return sc.NewSFTPClient()
+		}
+	}
+	return nil, fmt.Errorf("tunnel %d not found", id)
+}

@@ -6,17 +6,22 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	sftplib "github.com/pkg/sftp"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
+	"github.com/spance/intun/internal/sftp"
 	"github.com/spance/intun/internal/tunnel"
 	"golang.org/x/term"
 )
@@ -45,6 +50,7 @@ const (
 	ScreenSelectHost
 	ScreenSelectType
 	ScreenInputPort
+	ScreenSFTP
 )
 
 var (
@@ -103,7 +109,7 @@ var (
 				Bold(true)
 
 	shortcutStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6B7280"))
+			Foreground(lipgloss.Color("#CDD6F4"))
 
 	keyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#F59E0B")).
@@ -111,6 +117,12 @@ var (
 
 	lineStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6B7280"))
+
+	dirStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#89B4FA"))
+
+	inactiveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#585B70"))
 )
 
 type AuthPromptQueue struct {
@@ -234,6 +246,8 @@ type Model struct {
 	height        int
 	version       string
 	err           error
+	statusMsg     string
+	statusTicks   int
 	authQueue     *AuthPromptQueue
 	promptMode    bool
 	promptInput   string
@@ -241,6 +255,35 @@ type Model struct {
 	authCtx       *platform.AuthContext
 	cancelCtx     context.Context
 	cancelFunc    context.CancelFunc
+
+	sftpClient         *sftp.Client
+	sftpLocalDir       string
+	sftpRemoteDir      string
+	sftpLocalFiles     []sftp.FileEntry
+	sftpRemoteFiles    []sftp.FileEntry
+	sftpFocus          int
+	sftpCursor         [2]int
+	sftpScroll         [2]int
+	sftpTransferring   bool
+	sftpProgress       *sftp.ProgressInfo
+	sftpPreview        string
+	sftpPreviewing     bool
+	sftpCancel         context.CancelFunc
+	sftpTunnelID       int
+	sftpHostLabel      string
+	sftpDone           chan struct{}
+	sftpDirection      string
+	sftpPrevDone       int64
+	sftpProgressBar    progress.Model
+	sftpRenaming       bool
+	sftpRenameInput    string
+	sftpSyncConfirm    bool
+	sftpSyncConfirmMsg string
+}
+
+func (m *Model) setStatusMsg(msg string) {
+	m.statusMsg = msg
+	m.statusTicks = 3
 }
 
 type tickMsg struct{}
@@ -287,7 +330,7 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 	}
 	manager.SetAuthContext(authCtx)
 
-	return Model{
+	m := Model{
 		screen:        ScreenMain,
 		manager:       manager,
 		hosts:         hosts,
@@ -301,6 +344,10 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		width:         defaultWidth,
 		version:       version,
 	}
+
+	m.sftpProgressBar = progress.New(progress.WithScaledGradient("#7C3AED", "#F59E0B"), progress.WithoutPercentage(), progress.WithWidth(40))
+
+	return m
 }
 
 type hostItem struct {
@@ -448,6 +495,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tickMsg:
+		if m.statusTicks > 0 {
+			m.statusTicks--
+			if m.statusTicks == 0 {
+				m.statusMsg = ""
+			}
+		}
+		if m.screen == ScreenSFTP && m.sftpDone != nil {
+			if m.sftpTransferring && m.sftpProgress != nil {
+				doneNow := atomic.LoadInt64(&m.sftpProgress.Done)
+				m.sftpProgress.Speed = (doneNow - m.sftpPrevDone) * 2
+				m.sftpPrevDone = doneNow
+			}
+			select {
+			case <-m.sftpDone:
+				m.sftpTransferring = false
+				if m.sftpProgress != nil {
+					m.sftpProgress.Active = false
+				}
+				m = m.refreshSFTPFiles()
+				m.sftpDone = nil
+			default:
+			}
+		}
 		return m, tea.Batch(
 			tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 				return tickMsg{}
@@ -490,6 +560,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleTypeSelectKeys(msg)
 	case ScreenInputPort:
 		return m.handlePortInputKeys(msg)
+	case ScreenSFTP:
+		return m.handleSFTPKeys(msg)
 	}
 	return m, nil
 }
@@ -571,6 +643,8 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
 			m.manager.Restart(tunnels[m.selectedIndex].ID)
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "s":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
@@ -579,7 +653,13 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.manager.Stop(t.ID)
 			} else if t.Status == tunnel.StatusStopped {
 				m.manager.Restart(t.ID)
+			} else if t.Status == tunnel.StatusConnecting {
+				m.setStatusMsg("Cannot stop: tunnel is connecting")
+			} else if t.Status == tunnel.StatusError {
+				m.setStatusMsg("Use [r] to reconnect")
 			}
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "d":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
@@ -587,6 +667,62 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedIndex > 0 {
 				m.selectedIndex--
 			}
+		} else {
+			m.setStatusMsg("No tunnel selected")
+		}
+	case "f":
+		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
+			t := tunnels[m.selectedIndex]
+			if t.Status == tunnel.StatusRunning {
+				rawClient, err := m.manager.GetSFTPClient(t.ID)
+				if err != nil {
+					m.err = err
+					return m, nil
+				}
+				sftpRaw, ok := rawClient.(*sftplib.Client)
+				if !ok {
+					m.err = fmt.Errorf("invalid SFTP client type")
+					return m, nil
+				}
+				m.sftpClient = sftp.NewClient(sftpRaw)
+				cwd, _ := os.Getwd()
+				m.sftpLocalDir = cwd
+				remoteDir, _ := sftpRaw.Getwd()
+				if remoteDir == "" {
+					remoteDir = "/"
+				}
+				m.sftpRemoteDir = remoteDir
+				localFiles, lerr := sftp.ReadLocalDir(m.sftpLocalDir)
+				if lerr != nil {
+					m.err = lerr
+					m.sftpClient = nil
+					return m, nil
+				}
+				remoteFiles, rerr := m.sftpClient.ReadRemoteDir(m.sftpRemoteDir)
+				if rerr != nil {
+					m.err = rerr
+					m.sftpClient = nil
+					return m, nil
+				}
+				m.sftpLocalFiles = localFiles
+				m.sftpRemoteFiles = remoteFiles
+				m.sftpFocus = 0
+				m.sftpCursor = [2]int{0, 0}
+				m.sftpScroll = [2]int{0, 0}
+				m.sftpTransferring = false
+				m.sftpPreview = ""
+				m.sftpPreviewing = false
+				m.sftpCancel = nil
+				m.sftpTunnelID = t.ID
+				m.sftpHostLabel = fmt.Sprintf("%s@%s:%s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)
+				m.sftpDone = nil
+				m.sftpDirection = ""
+				m.screen = ScreenSFTP
+			} else {
+				m.setStatusMsg("Tunnel must be running to use SFTP")
+			}
+		} else {
+			m.setStatusMsg("No tunnel selected")
 		}
 	case "up", "k":
 		if m.selectedIndex > 0 {
@@ -766,7 +902,12 @@ func (m Model) View() string {
 	width := renderWidth(m.width)
 	height := renderHeight(m.height)
 
-	title := fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
+	var title string
+	if m.screen == ScreenSFTP {
+		title = fmt.Sprintf(" inTun SFTP - %s", m.sftpHostLabel)
+	} else {
+		title = fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
+	}
 	titleInnerWidth := width - 2
 	title = truncate(title, titleInnerWidth)
 	titlePadding := titleInnerWidth - lipgloss.Width(title)
@@ -774,7 +915,12 @@ func (m Model) View() string {
 		title = title + strings.Repeat(" ", titlePadding)
 	}
 	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+
+	if m.screen == ScreenSFTP {
+		b.WriteString(m.renderSFTPTabBar(width))
+	}
+	b.WriteString("\n")
 
 	if m.err != nil {
 		b.WriteString(errorStyle.Render("Error: " + truncate(m.err.Error(), width-7)))
@@ -790,6 +936,8 @@ func (m Model) View() string {
 		b.WriteString(m.typeList.View())
 	case ScreenInputPort:
 		b.WriteString(m.renderPortInput())
+	case ScreenSFTP:
+		b.WriteString(m.renderSFTPScreen())
 	}
 
 	content := b.String()
@@ -799,14 +947,43 @@ func (m Model) View() string {
 		content += strings.Repeat("\n", remainingLines)
 	}
 
-	view := content + m.renderShortcuts()
+	content += m.renderShortcuts()
+	if overlay := m.renderStatusOverlay(width, height); overlay != "" {
+		contentLines := strings.Split(content, "\n")
+		overlayLines := strings.Split(overlay, "\n")
+		maxLines := len(contentLines)
+		if len(overlayLines) > maxLines {
+			maxLines = len(overlayLines)
+		}
+		var sb strings.Builder
+		for i := 0; i < maxLines; i++ {
+			useOverlay := i < len(overlayLines) && strings.Contains(overlayLines[i], "\x1b[")
+			if useOverlay {
+				sb.WriteString(overlayLines[i])
+			} else if i < len(contentLines) {
+				line := contentLines[i]
+				lineW := lipgloss.Width(line)
+				if lineW < width {
+					line += strings.Repeat(" ", width-lineW)
+				}
+				sb.WriteString(line)
+			} else {
+				sb.WriteString(strings.Repeat(" ", width))
+			}
+			if i < maxLines-1 {
+				sb.WriteString("\n")
+			}
+		}
+		content = sb.String()
+	}
+
 	if m.promptMode {
-		return overlayCentered(view, m.renderPromptModal(width), width, height)
+		return overlayCentered(content, m.renderPromptModal(width), width, height)
 	}
 	if m.confirmQuit {
-		return overlayCentered(view, m.renderQuitConfirmModal(width), width, height)
+		return overlayCentered(content, m.renderQuitConfirmModal(width), width, height)
 	}
-	return view
+	return content
 }
 
 func (m Model) renderMainScreen() string {
@@ -1050,6 +1227,114 @@ func (m Model) renderQuitConfirmModal(width int) ModalView {
 	return renderModal(width, b.String(), 56)
 }
 
+func (m Model) renderStatusOverlay(width, height int) string {
+	if m.sftpSyncConfirm {
+		return renderDialogBox(width, height, m.sftpSyncConfirmMsg, true)
+	}
+	if m.statusMsg == "" {
+		return ""
+	}
+	msg := m.statusMsg
+	return renderDialogBox(width, height, msg, false)
+}
+
+func renderDialogBox(width, height int, msg string, hasButtons bool) string {
+	boxBg := "\x1b[48;5;236m"
+	textFg := "\x1b[38;5;252m"
+	labelFg := "\x1b[38;2;166;227;161m\x1b[1m"
+	btnBg := "\x1b[48;5;75m\x1b[38;5;235m\x1b[1m"
+	dimFg := "\x1b[38;5;102m"
+	bold := "\x1b[1m"
+	reset := "\x1b[0m"
+
+	type dl struct {
+		plainW int
+		ansi   string
+	}
+
+	padX := 3
+	padY := 1
+	var lines []dl
+
+	for i := 0; i < padY; i++ {
+		lines = append(lines, dl{})
+	}
+	for _, ml := range strings.Split(msg, "\n") {
+		trimmed := strings.TrimLeft(ml, " ")
+		if strings.HasPrefix(trimmed, "FROM:") || strings.HasPrefix(trimmed, "TO:") {
+			parts := strings.SplitN(trimmed, ": ", 2)
+			lead := len(ml) - len(trimmed)
+			label := parts[0] + ":"
+			value := ""
+			if len(parts) == 2 {
+				value = parts[1]
+			}
+			pw := lead + len(label) + 1 + len(value)
+			a := boxBg + strings.Repeat(" ", lead) + labelFg + label + reset + boxBg + " " + textFg + value + reset + boxBg
+			lines = append(lines, dl{pw, a})
+		} else {
+			lines = append(lines, dl{len(ml), boxBg + textFg + bold + ml + reset + boxBg})
+		}
+	}
+	if hasButtons {
+		lines = append(lines, dl{})
+		cp := "Enter Confirm"
+		ep := "  Esc Cancel"
+		pw := 1 + len(cp) + 1 + len(ep)
+		a := btnBg + " " + cp + " " + reset + boxBg + dimFg + ep + reset + boxBg
+		lines = append(lines, dl{pw, a})
+	}
+	for i := 0; i < padY; i++ {
+		lines = append(lines, dl{})
+	}
+
+	innerW := 0
+	for _, l := range lines {
+		if w := l.plainW + padX*2; w > innerW {
+			innerW = w
+		}
+	}
+
+	styledLines := make([]string, len(lines))
+	for i, l := range lines {
+		if l.plainW == 0 {
+			styledLines[i] = boxBg + strings.Repeat(" ", innerW) + reset
+		} else {
+			padR := innerW - padX - l.plainW
+			if padR < padX {
+				padR = padX
+			}
+			styledLines[i] = boxBg + strings.Repeat(" ", padX) + l.ansi + strings.Repeat(" ", padR) + reset
+		}
+	}
+
+	boxW := lipgloss.Width(styledLines[0])
+	boxH := len(styledLines)
+	row := height/2 - boxH/2
+	col := (width - boxW) / 2
+
+	var b strings.Builder
+	for y := 0; y < height; y++ {
+		if y == row {
+			for bi, sl := range styledLines {
+				if col > 0 {
+					b.WriteString(strings.Repeat(" ", col))
+				}
+				b.WriteString(sl)
+				if bi < len(styledLines)-1 {
+					b.WriteString("\n")
+				}
+			}
+			y += boxH - 1
+			continue
+		}
+		if y < height-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 func (m Model) renderShortcuts() string {
 	width := renderWidth(m.width)
 
@@ -1059,10 +1344,11 @@ func (m Model) renderShortcuts() string {
 		items = []string{
 			"[" + keyStyle.Render("↑↓") + "]Navigate",
 			"[" + keyStyle.Render("c") + "]Create",
+			"[" + keyStyle.Render("f") + "]SFTP",
 			"[" + keyStyle.Render("r") + "]Reconnect",
 			"[" + keyStyle.Render("s") + "]Stop/Start",
 			"[" + keyStyle.Render("d") + "]Delete",
-			"[" + keyStyle.Render("e") + "]Exit",
+			"[" + keyStyle.Render("q") + "]Quit",
 		}
 	case ScreenSelectHost, ScreenSelectType:
 		items = []string{
@@ -1075,6 +1361,30 @@ func (m Model) renderShortcuts() string {
 			"[0-9]Input Port",
 			"[" + keyStyle.Render("Enter") + "]Confirm",
 			"[" + keyStyle.Render("Esc") + "]Back",
+		}
+	case ScreenSFTP:
+		if m.sftpPreviewing {
+			items = []string{
+				"[" + keyStyle.Render("Esc") + "]Close Preview",
+			}
+		} else if m.sftpTransferring {
+			items = []string{
+				"[" + keyStyle.Render("Tab") + "]Switch",
+				"[" + keyStyle.Render("↑↓") + "]Navigate",
+				"Transferring...",
+				"[" + keyStyle.Render("q") + "]Back",
+			}
+		} else {
+			items = []string{
+				"[" + keyStyle.Render("Tab") + "]Switch",
+				"[" + keyStyle.Render("↑↓") + "]Navigate",
+				"[" + keyStyle.Render("Enter") + "]Open",
+				"[" + keyStyle.Render("s") + "]Sync",
+				"[" + keyStyle.Render("r") + "]Sync Dir",
+				"[" + keyStyle.Render("n") + "]Rename",
+				"[" + keyStyle.Render("v") + "]Preview",
+				"[" + keyStyle.Render("q") + "]Back",
+			}
 		}
 	}
 
@@ -1386,6 +1696,13 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.2f KB", float64(b)/float64(KB))
 }
 
+func formatTransferSpeed(bytesPerSec int64) string {
+	if bytesPerSec >= 1024*1024 {
+		return fmt.Sprintf("%.1fMB/s", float64(bytesPerSec)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1fKB/s", float64(bytesPerSec)/1024)
+}
+
 func formatSpeed(bytes int64, dir string) string {
 	return fmt.Sprintf("%s%s/s", dir, formatBytes(bytes))
 }
@@ -1399,4 +1716,723 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.sftpRenaming {
+		switch msg.String() {
+		case "enter":
+			return m.sftpConfirmRename()
+		case "esc":
+			m.sftpRenaming = false
+			m.sftpRenameInput = ""
+		case "backspace":
+			if len(m.sftpRenameInput) > 0 {
+				m.sftpRenameInput = m.sftpRenameInput[:len(m.sftpRenameInput)-1]
+			}
+		default:
+			if len(msg.String()) == 1 && msg.String()[0] >= 32 {
+				m.sftpRenameInput += msg.String()
+			}
+		}
+		return m, nil
+	}
+
+	if m.sftpSyncConfirm {
+		switch msg.String() {
+		case "enter":
+			m.sftpSyncConfirm = false
+			m.sftpSyncConfirmMsg = ""
+			return m.sftpDoRecursive()
+		case "esc":
+			m.sftpSyncConfirm = false
+			m.sftpSyncConfirmMsg = ""
+		}
+		return m, nil
+	}
+
+	if m.sftpPreviewing {
+		switch msg.String() {
+		case "esc", "q":
+			m.sftpPreviewing = false
+			m.sftpPreview = ""
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "q", "esc":
+		if m.sftpCancel != nil {
+			m.sftpCancel()
+			m.sftpCancel = nil
+		}
+		if m.sftpClient != nil {
+			m.sftpClient.Close()
+			m.sftpClient = nil
+		}
+		m.screen = ScreenMain
+		return m, nil
+	case "tab":
+		if m.sftpFocus == 0 {
+			m.sftpFocus = 1
+		} else {
+			m.sftpFocus = 0
+		}
+	case "up", "k":
+		if m.sftpCursor[m.sftpFocus] > 0 {
+			m.sftpCursor[m.sftpFocus]--
+		}
+	case "down", "j":
+		files := m.currentSFTPFiles()
+		if m.sftpCursor[m.sftpFocus] < len(files) {
+			m.sftpCursor[m.sftpFocus]++
+		}
+	case "pgup":
+		visibleHeight := m.sftpVisibleHeight()
+		cur := &m.sftpCursor[m.sftpFocus]
+		*cur -= visibleHeight
+		if *cur < 0 {
+			*cur = 0
+		}
+	case "pgdown":
+		files := m.currentSFTPFiles()
+		visibleHeight := m.sftpVisibleHeight()
+		maxCur := len(files)
+		cur := &m.sftpCursor[m.sftpFocus]
+		*cur += visibleHeight
+		if *cur > maxCur {
+			*cur = maxCur
+		}
+	case "enter":
+		return m.sftpEnterDir()
+	case "s":
+		if m.sftpTransferring {
+			m.setStatusMsg("Wait for transfer to complete")
+			return m, nil
+		}
+		return m.sftpStartSync()
+	case "r":
+		if m.sftpTransferring {
+			m.setStatusMsg("Wait for transfer to complete")
+			return m, nil
+		}
+		return m.sftpStartRecursiveConfirm()
+	case "v":
+		if m.sftpTransferring {
+			m.setStatusMsg("Wait for transfer to complete")
+			return m, nil
+		}
+		return m.sftpPreviewFile()
+	case "n":
+		if !m.sftpTransferring {
+			files := m.currentSFTPFiles()
+			cursor := m.sftpCursor[m.sftpFocus]
+			if cursor == 0 || cursor > len(files) {
+				m.setStatusMsg("No file selected")
+				return m, nil
+			}
+			m.sftpRenaming = true
+			m.sftpRenameInput = files[cursor-1].Name
+		} else {
+			m.setStatusMsg("Wait for transfer to complete")
+		}
+	}
+	return m, nil
+}
+
+func (m Model) currentSFTPFiles() []sftp.FileEntry {
+	if m.sftpFocus == 0 {
+		return m.sftpLocalFiles
+	}
+	return m.sftpRemoteFiles
+}
+
+func (m Model) sftpVisibleHeight() int {
+	h := m.height - 8
+	if h < 5 {
+		h = 5
+	}
+	return h
+}
+
+func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	var target string
+
+	if cursor == 0 {
+		if m.sftpFocus == 0 {
+			target = filepath.Dir(m.sftpLocalDir)
+		} else {
+			target = filepath.Dir(m.sftpRemoteDir)
+		}
+	} else {
+		idx := cursor - 1
+		if idx >= len(files) || !files[idx].IsDir {
+			m.setStatusMsg("Use [v] to preview, [s] to sync")
+			return m, nil
+		}
+		if m.sftpFocus == 0 {
+			target = filepath.Join(m.sftpLocalDir, files[idx].Name)
+		} else {
+			if m.sftpRemoteDir == "/" {
+				target = "/" + files[idx].Name
+			} else {
+				target = m.sftpRemoteDir + "/" + files[idx].Name
+			}
+		}
+	}
+
+	return m.sftpNavigateTo(target)
+}
+
+func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
+	if m.sftpFocus == 0 {
+		localFiles, err := sftp.ReadLocalDir(path)
+		if err != nil {
+			m.setStatusMsg("Cannot open directory")
+			return m, nil
+		}
+		m.sftpLocalDir = path
+		m.sftpLocalFiles = localFiles
+	} else {
+		remoteFiles, err := m.sftpClient.ReadRemoteDir(path)
+		if err != nil {
+			m.setStatusMsg("Cannot open directory")
+			return m, nil
+		}
+		m.sftpRemoteDir = path
+		m.sftpRemoteFiles = remoteFiles
+	}
+	m.sftpCursor[m.sftpFocus] = 0
+	m.sftpScroll[m.sftpFocus] = 0
+	return m, nil
+}
+
+func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
+	if m.sftpFocus == 0 {
+		files := m.sftpLocalFiles
+		cursor := m.sftpCursor[0]
+		if cursor == 0 || cursor > len(files) {
+			m.setStatusMsg("No file selected")
+			return m, nil
+		}
+		entry := files[cursor-1]
+		if entry.IsDir {
+			m.setStatusMsg("Use [r] for directory sync")
+			return m, nil
+		}
+		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+		remotePath := m.sftpRemoteDir + "/" + entry.Name
+		m.sftpTransferring = true
+		m.sftpDirection = "↑"
+		m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+		m.sftpPrevDone = 0
+		done := make(chan struct{})
+		m.sftpDone = done
+		client := m.sftpClient
+		go func() {
+			client.Upload(localPath, remotePath, func(n int64) {
+				atomic.StoreInt64(&m.sftpProgress.Done, n)
+			})
+			close(done)
+		}()
+		return m, nil
+	}
+
+	files := m.sftpRemoteFiles
+	cursor := m.sftpCursor[1]
+	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if entry.IsDir {
+		m.setStatusMsg("Use [r] for directory sync")
+		return m, nil
+	}
+	remotePath := m.sftpRemoteDir + "/" + entry.Name
+	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	m.sftpTransferring = true
+	m.sftpDirection = "↓"
+	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
+	m.sftpPrevDone = 0
+	done := make(chan struct{})
+	m.sftpDone = done
+	client := m.sftpClient
+	go func() {
+		client.Download(remotePath, localPath, func(n int64) {
+			atomic.StoreInt64(&m.sftpProgress.Done, n)
+		})
+		close(done)
+	}()
+	return m, nil
+}
+
+func (m Model) sftpStartRecursiveConfirm() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if !entry.IsDir {
+		m.setStatusMsg("Use [s] for file sync")
+		return m, nil
+	}
+
+	var src, dst string
+	if m.sftpFocus == 0 {
+		src = filepath.Join(m.sftpLocalDir, entry.Name)
+		dst = m.sftpRemoteDir + "/" + entry.Name
+	} else {
+		src = m.sftpRemoteDir + "/" + entry.Name
+		dst = filepath.Join(m.sftpLocalDir, entry.Name)
+	}
+
+	m.sftpSyncConfirm = true
+	m.sftpSyncConfirmMsg = fmt.Sprintf("FROM: %s\n  TO: %s", src, dst)
+	return m, nil
+}
+
+func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
+	if m.sftpFocus == 0 {
+		files := m.sftpLocalFiles
+		cursor := m.sftpCursor[0]
+		if cursor == 0 || cursor > len(files) {
+			return m, nil
+		}
+		entry := files[cursor-1]
+		if !entry.IsDir {
+			return m, nil
+		}
+		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+		remotePath := m.sftpRemoteDir + "/" + entry.Name
+		m.sftpTransferring = true
+		m.sftpDirection = "⇡"
+		m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
+		m.sftpPrevDone = 0
+		done := make(chan struct{})
+		m.sftpDone = done
+		client := m.sftpClient
+		go func() {
+			client.UploadDir(localPath, remotePath, func(done, total int64, file string) {
+				atomic.StoreInt64(&m.sftpProgress.Done, done)
+				atomic.StoreInt64(&m.sftpProgress.Total, total)
+				m.sftpProgress.File = file
+			})
+			close(done)
+		}()
+		return m, nil
+	}
+
+	files := m.sftpRemoteFiles
+	cursor := m.sftpCursor[1]
+	if cursor == 0 || cursor > len(files) {
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if !entry.IsDir {
+		return m, nil
+	}
+	remotePath := m.sftpRemoteDir + "/" + entry.Name
+	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	m.sftpTransferring = true
+	m.sftpDirection = "⇣"
+	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
+	m.sftpPrevDone = 0
+	done := make(chan struct{})
+	m.sftpDone = done
+	client := m.sftpClient
+	go func() {
+		client.DownloadDir(remotePath, localPath, func(done, total int64, file string) {
+			atomic.StoreInt64(&m.sftpProgress.Done, done)
+			atomic.StoreInt64(&m.sftpProgress.Total, total)
+			m.sftpProgress.File = file
+		})
+		close(done)
+	}()
+	return m, nil
+}
+
+func (m Model) sftpPreviewFile() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	if cursor == 0 || cursor > len(files) {
+		m.setStatusMsg("No file selected")
+		return m, nil
+	}
+	entry := files[cursor-1]
+	if entry.IsDir {
+		m.setStatusMsg("Cannot preview a directory")
+		return m, nil
+	}
+
+	if m.sftpFocus == 0 {
+		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			m.sftpPreview = fmt.Sprintf("Error: %v", err)
+			m.sftpPreviewing = true
+			return m, nil
+		}
+		if len(data) > 4096 {
+			data = data[:4096]
+		}
+		content := string(data)
+		if isBinaryContent(content) {
+			content = "[binary file]"
+		}
+		m.sftpPreview = content
+	} else {
+		remotePath := m.sftpRemoteDir + "/" + entry.Name
+		content, err := m.sftpClient.Preview(remotePath)
+		if err != nil {
+			m.sftpPreview = fmt.Sprintf("Error: %v", err)
+			m.sftpPreviewing = true
+			return m, nil
+		}
+		m.sftpPreview = content
+	}
+	m.sftpPreviewing = true
+	return m, nil
+}
+
+func (m Model) sftpConfirmRename() (tea.Model, tea.Cmd) {
+	files := m.currentSFTPFiles()
+	cursor := m.sftpCursor[m.sftpFocus]
+	if cursor == 0 || cursor > len(files) {
+		m.sftpRenaming = false
+		m.sftpRenameInput = ""
+		return m, nil
+	}
+
+	oldName := files[cursor-1].Name
+	newName := m.sftpRenameInput
+	m.sftpRenaming = false
+	m.sftpRenameInput = ""
+
+	if newName == "" || newName == oldName {
+		return m, nil
+	}
+
+	if m.sftpFocus == 0 {
+		oldPath := filepath.Join(m.sftpLocalDir, oldName)
+		newPath := filepath.Join(m.sftpLocalDir, newName)
+		if err := os.Rename(oldPath, newPath); err != nil {
+			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
+			return m, nil
+		}
+	} else {
+		oldPath := m.sftpRemoteDir + "/" + oldName
+		newPath := m.sftpRemoteDir + "/" + newName
+		if err := m.sftpClient.Rename(oldPath, newPath); err != nil {
+			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
+			return m, nil
+		}
+	}
+
+	m = m.refreshSFTPFiles()
+	return m, nil
+}
+
+func (m Model) refreshSFTPFiles() Model {
+	localFiles, err := sftp.ReadLocalDir(m.sftpLocalDir)
+	if err == nil {
+		m.sftpLocalFiles = localFiles
+	}
+	remoteFiles, err := m.sftpClient.ReadRemoteDir(m.sftpRemoteDir)
+	if err == nil {
+		m.sftpRemoteFiles = remoteFiles
+	}
+	return m
+}
+
+func isBinaryContent(s string) bool {
+	for _, r := range s {
+		if r == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) renderSFTPTabBar(width int) string {
+	half := width / 2
+
+	localLabel := " LOCAL "
+	remoteLabel := " REMOTE "
+
+	activeStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#7C3AED")).
+		Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+	inactiveStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#313244")).
+		Foreground(lipgloss.Color("#6C7086"))
+
+	var left, right string
+	if m.sftpFocus == 0 {
+		left = activeStyle.Render(localLabel)
+		right = inactiveStyle.Render(remoteLabel)
+	} else {
+		left = inactiveStyle.Render(localLabel)
+		right = activeStyle.Render(remoteLabel)
+	}
+
+	leftPad := half - lipgloss.Width(left)
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	rightPad := half - lipgloss.Width(right)
+	if rightPad < 0 {
+		rightPad = 0
+	}
+
+	return left + strings.Repeat(" ", leftPad) +
+		right + strings.Repeat(" ", rightPad)
+}
+
+func (m Model) renderSFTPScreen() string {
+	width := m.width
+	if width < minTermWidth {
+		width = 80
+	}
+	panelWidth := width/2 - 3
+	if panelWidth < 20 {
+		panelWidth = 20
+	}
+
+	var b strings.Builder
+
+	localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, m.sftpFocus == 0)
+	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, m.sftpFocus == 1)
+
+	localLines := strings.Split(localPanel, "\n")
+	remoteLines := strings.Split(remotePanel, "\n")
+	maxLines := len(localLines)
+	if len(remoteLines) > maxLines {
+		maxLines = len(remoteLines)
+	}
+
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("│")
+	for i := 0; i < maxLines; i++ {
+		var left, right string
+		if i < len(localLines) {
+			left = localLines[i]
+		}
+		if i < len(remoteLines) {
+			right = remoteLines[i]
+		}
+		leftPad := panelWidth - lipgloss.Width(left)
+		if leftPad < 0 {
+			leftPad = 0
+		}
+		rightPad := panelWidth - lipgloss.Width(right)
+		if rightPad < 0 {
+			rightPad = 0
+		}
+		b.WriteString(left)
+		b.WriteString(strings.Repeat(" ", leftPad))
+		b.WriteString(" ")
+		b.WriteString(sep)
+		b.WriteString(" ")
+		b.WriteString(right)
+		b.WriteString(strings.Repeat(" ", rightPad))
+		b.WriteString("\n")
+	}
+
+	if m.sftpRenaming {
+		renameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		input := m.sftpRenameInput + "_"
+		hint := "Rename: " + input
+		confirmHint := "  [Enter]Confirm [Esc]Cancel"
+		rendered := renameStyle.Render(hint) + shortcutStyle.Render(confirmHint)
+		pad := width - lipgloss.Width(rendered)
+		if pad > 0 {
+			rendered += strings.Repeat(" ", pad)
+		}
+		b.WriteString(rendered)
+		b.WriteString("\n")
+	}
+
+	if m.sftpTransferring {
+		b.WriteString(m.renderSFTPProgress(width))
+		b.WriteString("\n")
+	}
+
+	if m.sftpPreviewing {
+		b.WriteString(m.renderSFTPPreview(width))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width int, focused bool) string {
+	var b strings.Builder
+
+	hdrStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#585B70")).Bold(true)
+	if focused {
+		hdrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
+	}
+
+	dirDisplay := truncate(dir, width-1)
+	hdrText := dirDisplay
+	visibleW := lipgloss.Width(hdrText)
+	padW := width - visibleW
+	if padW > 0 {
+		hdrText += strings.Repeat(" ", padW)
+	}
+	b.WriteString(hdrStyle.Render(hdrText))
+	b.WriteString("\n")
+
+	visibleHeight := m.height - 8
+	if visibleHeight < 5 {
+		visibleHeight = 5
+	}
+
+	cursor := m.sftpCursor[panelIdx]
+	scroll := m.sftpScroll[panelIdx]
+	if cursor < scroll {
+		scroll = cursor
+	}
+	if cursor > scroll+visibleHeight-1 {
+		scroll = cursor - visibleHeight + 1
+	}
+
+	totalEntries := len(files) + 1
+	renderIdx := 0
+	for i := scroll; i < totalEntries && renderIdx < visibleHeight; i++ {
+		var name, sizeStr string
+		var isDir bool
+
+		if i == 0 {
+			name = ".."
+			isDir = true
+		} else {
+			idx := i - 1
+			if idx >= len(files) {
+				break
+			}
+			entry := files[idx]
+			name = entry.Name
+			isDir = entry.IsDir
+			if !isDir && entry.Size > 0 {
+				sizeStr = formatBytes(entry.Size)
+			}
+		}
+
+		displayName := name
+		if isDir && i > 0 {
+			displayName = name + "/"
+		}
+
+		prefix := "  "
+		if i == cursor {
+			prefix = "❯ "
+		}
+
+		var line string
+		if sizeStr != "" {
+			nameWidth := width - 3 - len(sizeStr)
+			if nameWidth < 5 {
+				nameWidth = 5
+			}
+			truncated := truncate(displayName, nameWidth)
+			padLen := width - 3 - len(truncated) - len(sizeStr)
+			if padLen < 1 {
+				padLen = 1
+			}
+			line = prefix + truncated + strings.Repeat(" ", padLen) + sizeStr
+		} else {
+			line = prefix + truncate(displayName, width-3)
+		}
+
+		if i == cursor && focused {
+			linePad := width - lipgloss.Width(line)
+			if linePad > 0 {
+				line += strings.Repeat(" ", linePad)
+			}
+			b.WriteString(selectedStyle.Render(line))
+		} else if i == cursor {
+			linePad := width - lipgloss.Width(line)
+			if linePad > 0 {
+				line += strings.Repeat(" ", linePad)
+			}
+			if isDir {
+				b.WriteString(dirStyle.Render(line))
+			} else {
+				b.WriteString(inactiveStyle.Render(line))
+			}
+		} else {
+			linePad := width - lipgloss.Width(line)
+			if linePad > 0 {
+				line += strings.Repeat(" ", linePad)
+			}
+			if isDir {
+				b.WriteString(dirStyle.Render(line))
+			} else {
+				b.WriteString(shortcutStyle.Render(line))
+			}
+		}
+		b.WriteString("\n")
+		renderIdx++
+	}
+
+	return b.String()
+}
+
+func (m Model) renderSFTPPreview(width int) string {
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true).Render("── Preview ──"))
+	b.WriteString("\n")
+
+	lines := strings.Split(m.sftpPreview, "\n")
+	maxLines := 20
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+
+	previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Width(width - 4)
+	for _, line := range lines {
+		displayLine := truncate(line, width-4)
+		b.WriteString(previewStyle.Render(displayLine))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m Model) renderSFTPProgress(width int) string {
+	p := m.sftpProgress
+	if p == nil {
+		return ""
+	}
+	var pct float64
+	doneNow := atomic.LoadInt64(&p.Done)
+	totalNow := atomic.LoadInt64(&p.Total)
+	if totalNow > 0 {
+		pct = float64(doneNow) / float64(totalNow)
+		if pct > 1 {
+			pct = 1
+		}
+	}
+
+	var speedStr string
+	if p.Speed > 0 {
+		speedStr = " " + formatTransferSpeed(p.Speed)
+	}
+
+	barWidth := width - 6
+	if barWidth < 20 {
+		barWidth = 20
+	}
+	barModel := m.sftpProgressBar
+	barModel.Width = barWidth
+
+	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	infoLine := infoStyle.Render(fmt.Sprintf("%s %s %.0f%%%s", m.sftpDirection, p.File, pct*100, speedStr))
+
+	return infoLine + "\n" + barModel.ViewAs(pct)
 }

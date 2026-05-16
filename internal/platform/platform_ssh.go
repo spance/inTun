@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	sftp "github.com/pkg/sftp"
 )
 
 type SSHConnection struct {
@@ -129,6 +130,17 @@ func (c *SSHConnection) addForward(f io.Closer) {
 	c.mu.Lock()
 	c.forwards = append(c.forwards, f)
 	c.mu.Unlock()
+}
+
+func (c *SSHConnection) NewSFTPClient() (interface{}, error) {
+	c.mu.RLock()
+	client := c.client
+	exited := c.exited
+	c.mu.RUnlock()
+	if exited || client == nil {
+		return nil, fmt.Errorf("SSH_CONNECTION_LOST: connection not available")
+	}
+	return sftp.NewClient(client)
 }
 
 type SSHExecutor struct{}
