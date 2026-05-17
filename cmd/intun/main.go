@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/monitor"
 	"github.com/spance/intun/internal/tui"
@@ -26,9 +26,7 @@ func main() {
 	defer mon.Stop()
 
 	model := tui.NewModel(hosts, manager, Version)
-	p := tea.NewProgram(model,
-		tea.WithAltScreen(),
-	)
+	p := tea.NewProgram(model)
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

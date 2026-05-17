@@ -3,7 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
-	"io"
+	"image/color"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,10 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/progress"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	sftplib "github.com/pkg/sftp"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
@@ -54,75 +52,178 @@ const (
 )
 
 var (
+	colorSurface  = lipgloss.Color("#161B22")
+	colorPanel    = lipgloss.Color("#0D1117")
+	colorPanelHi  = lipgloss.Color("#1F2937")
+	colorGlass    = lipgloss.Color("#111827")
+	colorText     = lipgloss.Color("#D6DEEB")
+	colorMuted    = lipgloss.Color("#7D8590")
+	colorAccent   = lipgloss.Color("#56B6C2")
+	colorAccent2  = lipgloss.Color("#7C3AED")
+	colorSuccess  = lipgloss.Color("#3FB950")
+	colorWarning  = lipgloss.Color("#D29922")
+	colorDanger   = lipgloss.Color("#F85149")
+	colorSelected = lipgloss.Color("#E6EDF3")
+
 	titleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7C3AED")).
+			Foreground(colorSelected).
+			Background(colorAccent2).
 			Bold(true).
 			Padding(0, 1)
 
 	statusStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#10B981"))
+			Foreground(colorSuccess)
 
 	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#EF4444"))
+			Foreground(colorDanger)
 
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#6B7280")).
+			BorderForeground(colorMuted).
 			Padding(0, 1)
 
 	headerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9CA3AF")).
+			Foreground(colorMuted).
 			Bold(true)
 
 	selectedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
+			Foreground(colorSelected).
 			Bold(true)
 
 	runningBadgeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Background(lipgloss.Color("#10B981")).
+				Foreground(colorPanel).
+				Background(colorSuccess).
 				Bold(true).
 				Padding(0, 1)
 
 	stoppedBadgeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Background(lipgloss.Color("#6B7280")).
+				Foreground(colorSelected).
+				Background(colorMuted).
 				Padding(0, 1)
 
 	errorBadgeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#EF4444")).
+			Foreground(colorSelected).
+			Background(colorDanger).
 			Bold(true).
 			Padding(0, 1)
 
 	connectingBadgeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#000000")).
-				Background(lipgloss.Color("#F59E0B")).
+				Foreground(colorPanel).
+				Background(colorWarning).
 				Padding(0, 1)
 
 	labelHighlightStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F59E0B")).
+				Foreground(colorWarning).
 				Bold(true)
 
 	labelSelectedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FBBF24")).
+				Foreground(colorWarning).
 				Bold(true)
 
 	shortcutStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#CDD6F4"))
+			Foreground(colorText)
 
 	keyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F59E0B")).
+			Foreground(colorWarning).
 			Bold(true)
 
 	lineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6B7280"))
+			Foreground(colorMuted)
 
 	dirStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#89B4FA"))
+			Foreground(colorAccent)
 
 	inactiveStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#585B70"))
+			Foreground(colorMuted)
+
+	accentStyle = lipgloss.NewStyle().
+			Foreground(colorAccent)
+
+	successStyle = lipgloss.NewStyle().
+			Foreground(colorSuccess)
+
+	warningStyle = lipgloss.NewStyle().
+			Foreground(colorWarning)
+
+	dangerStyle = lipgloss.NewStyle().
+			Foreground(colorDanger)
+
+	mutedStyle = lipgloss.NewStyle().
+			Foreground(colorMuted)
+
+	sectionTitleStyle = lipgloss.NewStyle().
+				Foreground(colorAccent).
+				Bold(true).
+				Padding(0, 1)
+
+	eyebrowStyle = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Bold(true)
+
+	statCardStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorMuted).
+			Padding(0, 2).
+			MarginRight(1).
+			Width(18)
+
+	borderAccentStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				BorderForegroundBlend(colorAccent, colorAccent2)
+
+	tableHeaderStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Bold(true).
+				Padding(0, 1)
+
+	tableSelectedStyle = lipgloss.NewStyle().
+				Foreground(colorSelected).
+				Background(colorPanelHi).
+				Bold(true).
+				Padding(0, 1)
+
+	tableEvenStyle = lipgloss.NewStyle().
+			Foreground(colorText).
+			Padding(0, 1)
+
+	tableOddStyle = lipgloss.NewStyle().
+			Foreground(colorText).
+			Background(colorSurface).
+			Padding(0, 1)
+
+	listItemStyle = lipgloss.NewStyle().
+			Foreground(colorText).
+			Padding(0, 1).
+			MarginBottom(1)
+
+	listSelectedStyle = lipgloss.NewStyle().
+				Foreground(colorSelected).
+				Background(colorPanelHi).
+				Bold(true).
+				Padding(0, 1).
+				MarginBottom(1)
+
+	commandBarStyle = lipgloss.NewStyle().
+			Background(colorSurface).
+			Foreground(colorText).
+			Padding(0, 1)
+
+	commandKeyStyle = lipgloss.NewStyle().
+			Background(colorAccent).
+			Foreground(colorPanel).
+			Bold(true).
+			Padding(0, 1)
+
+	commandTextStyle = lipgloss.NewStyle().
+				Foreground(colorText).
+				PaddingRight(1)
+
+	labelPillStyle = lipgloss.NewStyle().
+			Foreground(colorPanel).
+			Background(colorWarning).
+			Bold(true).
+			Padding(0, 1).
+			MarginRight(1)
 )
 
 type AuthPromptQueue struct {
@@ -233,8 +334,10 @@ type Model struct {
 	screen        Screen
 	manager       *tunnel.Manager
 	hosts         []config.Host
-	hostList      list.Model
-	typeList      list.Model
+	hostCursor    int
+	hostScroll    int
+	typeCursor    int
+	typeScroll    int
 	selectedHost  config.Host
 	selectedType  tunnel.TunnelType
 	localPort     string
@@ -248,6 +351,7 @@ type Model struct {
 	err           error
 	statusMsg     string
 	statusTicks   int
+	trafficHist   map[int][]int64
 	authQueue     *AuthPromptQueue
 	promptMode    bool
 	promptInput   string
@@ -274,7 +378,6 @@ type Model struct {
 	sftpDone           chan struct{}
 	sftpDirection      string
 	sftpPrevDone       int64
-	sftpProgressBar    progress.Model
 	sftpRenaming       bool
 	sftpRenameInput    string
 	sftpSyncConfirm    bool
@@ -284,6 +387,27 @@ type Model struct {
 func (m *Model) setStatusMsg(msg string) {
 	m.statusMsg = msg
 	m.statusTicks = 3
+}
+
+func (m *Model) sampleTunnelTraffic() {
+	if m.trafficHist == nil {
+		m.trafficHist = make(map[int][]int64)
+	}
+	seen := make(map[int]struct{})
+	for _, t := range m.manager.List() {
+		seen[t.ID] = struct{}{}
+		sample := t.UploadSpeed + t.DownloadSpeed
+		history := append(m.trafficHist[t.ID], sample)
+		if len(history) > 120 {
+			history = history[len(history)-120:]
+		}
+		m.trafficHist[t.ID] = history
+	}
+	for id := range m.trafficHist {
+		if _, ok := seen[id]; !ok {
+			delete(m.trafficHist, id)
+		}
+	}
 }
 
 type tickMsg struct{}
@@ -298,29 +422,6 @@ type authRequestMsg struct {
 }
 
 func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Model {
-	hostItems := make([]list.Item, len(hosts))
-	for i, h := range hosts {
-		hostItems[i] = hostItem{host: h}
-	}
-
-	hostList := list.New(hostItems, newHostDelegate(), 60, defaultHeight)
-	hostList.Title = "Select Host"
-	hostList.SetShowStatusBar(false)
-	hostList.SetFilteringEnabled(true)
-	hostList.SetShowHelp(false)
-
-	typeItems := []list.Item{
-		typeItem{name: "Local (-L)", desc: "Forward local port to remote server", t: tunnel.Local},
-		typeItem{name: "Remote (-R)", desc: "Forward remote port to local server", t: tunnel.Remote},
-		typeItem{name: "Dynamic (-D)", desc: "SOCKS proxy on local port", t: tunnel.Dynamic},
-	}
-
-	typeList := list.New(typeItems, list.NewDefaultDelegate(), 60, typeListHeight)
-	typeList.Title = "Select Tunnel Type"
-	typeList.SetShowStatusBar(false)
-	typeList.SetShowHelp(false)
-	typeList.SetShowPagination(false)
-
 	authQueue := NewAuthPromptQueue()
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	authCtx := &platform.AuthContext{
@@ -334,8 +435,6 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		screen:        ScreenMain,
 		manager:       manager,
 		hosts:         hosts,
-		hostList:      hostList,
-		typeList:      typeList,
 		authQueue:     authQueue,
 		authCtx:       authCtx,
 		cancelCtx:     cancelCtx,
@@ -343,106 +442,16 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 		selectedIndex: 0,
 		width:         defaultWidth,
 		version:       version,
+		trafficHist:   make(map[int][]int64),
 	}
-
-	m.sftpProgressBar = progress.New(progress.WithScaledGradient("#7C3AED", "#F59E0B"), progress.WithoutPercentage(), progress.WithWidth(40))
 
 	return m
-}
-
-type hostItem struct {
-	host config.Host
-}
-
-func (h hostItem) FilterValue() string {
-	v := h.host.Name
-	if len(h.host.Labels) > 0 {
-		v += " " + strings.Join(h.host.Labels, " ")
-	}
-	return v
-}
-
-func (h hostItem) Title() string {
-	host := h.host.Hostname
-	if host == "" {
-		host = h.host.Name
-	}
-	if len(h.host.Labels) > 0 {
-		return host + " # " + strings.Join(h.host.Labels, ", ")
-	}
-	return host
-}
-
-func (h hostItem) Description() string {
-	return fmt.Sprintf("%s@%s:%s", h.host.User, h.host.Hostname, h.host.Port)
-}
-
-type hostDelegate struct {
-	styles list.DefaultItemStyles
-}
-
-func newHostDelegate() hostDelegate {
-	return hostDelegate{styles: list.NewDefaultItemStyles()}
-}
-
-func (d hostDelegate) Height() int                             { return 2 }
-func (d hostDelegate) Spacing() int                            { return 1 }
-func (d hostDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
-
-func (d hostDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	h, ok := item.(hostItem)
-	if !ok {
-		return
-	}
-
-	s := list.NewDefaultItemStyles()
-	selected := index == m.Index()
-
-	titleStyle := s.NormalTitle
-	descStyle := s.NormalDesc
-	if selected {
-		titleStyle = s.SelectedTitle
-		descStyle = s.SelectedDesc
-	}
-
-	host := h.host.Hostname
-	if host == "" {
-		host = h.host.Name
-	}
-
-	var title string
-	if len(h.host.Labels) > 0 {
-		labelStr := strings.Join(h.host.Labels, ", ")
-		if selected {
-			title = titleStyle.Render(host+" # ") + labelSelectedStyle.Render(labelStr)
-		} else {
-			title = titleStyle.Render(host+" # ") + labelHighlightStyle.Render(labelStr)
-		}
-	} else {
-		title = titleStyle.Render(host)
-	}
-
-	desc := descStyle.Render(h.Description())
-
-	fmt.Fprintf(w, "%s\n%s", title, desc)
 }
 
 type typeItem struct {
 	name string
 	desc string
 	t    tunnel.TunnelType
-}
-
-func (t typeItem) FilterValue() string {
-	return t.name
-}
-
-func (t typeItem) Title() string {
-	return t.name
-}
-
-func (t typeItem) Description() string {
-	return t.desc
 }
 
 func (m Model) Init() tea.Cmd {
@@ -477,24 +486,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		listWidth, listHeight := listDimensions(msg.Width, msg.Height, hostListHeight)
-		typeWidth, typeHeight := listDimensions(msg.Width, msg.Height, typeListHeight)
-		m.hostList.SetSize(listWidth, listHeight)
-		m.typeList.SetSize(typeWidth, typeHeight)
 		return m, nil
 	case sizeMsg:
 		if msg.width != m.width || msg.height != m.height {
 			m.width = msg.width
 			m.height = msg.height
-			listWidth, listHeight := listDimensions(msg.width, msg.height, hostListHeight)
-			typeWidth, typeHeight := listDimensions(msg.width, msg.height, typeListHeight)
-			m.hostList.SetSize(listWidth, listHeight)
-			m.typeList.SetSize(typeWidth, typeHeight)
 		}
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tickMsg:
+		m.sampleTunnelTraffic()
 		if m.statusTicks > 0 {
 			m.statusTicks--
 			if m.statusTicks == 0 {
@@ -533,14 +535,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	var cmd tea.Cmd
-	switch m.screen {
-	case ScreenSelectHost:
-		m.hostList, cmd = m.hostList.Update(msg)
-	case ScreenSelectType:
-		m.typeList, cmd = m.typeList.Update(msg)
-	}
-	return m, cmd
+	return m, nil
 }
 
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -611,10 +606,11 @@ func (m Model) handlePromptKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	default:
 		if current.Type == platform.AuthRequestPassword {
-			if msg.Type == tea.KeySpace {
+			key := msg.Key()
+			if key.Code == tea.KeySpace {
 				m.promptInput += " "
-			} else if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
-				m.promptInput += string(msg.Runes)
+			} else if key.Text != "" {
+				m.promptInput += key.Text
 			}
 		}
 		return m, nil
@@ -755,31 +751,43 @@ func (m Model) hasLiveTunnels() bool {
 func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		if item, ok := m.hostList.SelectedItem().(hostItem); ok {
-			m.selectedHost = item.host
+		if len(m.hosts) > 0 && m.hostCursor < len(m.hosts) {
+			m.selectedHost = m.hosts[m.hostCursor]
 			m.screen = ScreenSelectType
 			return m, nil
 		}
 	case "esc", "q":
 		m.screen = ScreenMain
 		return m, nil
+	case "up", "k":
+		if m.hostCursor > 0 {
+			m.hostCursor--
+		}
+	case "down", "j":
+		if m.hostCursor < len(m.hosts)-1 {
+			m.hostCursor++
+		}
+	case "home":
+		m.hostCursor = 0
+	case "end":
+		if len(m.hosts) > 0 {
+			m.hostCursor = len(m.hosts) - 1
+		}
 	}
-	var cmd tea.Cmd
-	m.hostList, cmd = m.hostList.Update(msg)
-	return m, cmd
+	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, selectListHeight(m.height, hostListHeight))
+	return m, nil
 }
 
 func (m Model) handleTypeSelectKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		var cmd tea.Cmd
-		m.typeList, cmd = m.typeList.Update(msg)
-		return m, cmd
+		return m, nil
 	}
-
+	items := tunnelTypeItems()
 	switch keyMsg.String() {
 	case "enter":
-		if item, ok := m.typeList.SelectedItem().(typeItem); ok {
+		if m.typeCursor >= 0 && m.typeCursor < len(items) {
+			item := items[m.typeCursor]
 			m.selectedType = item.t
 			m.screen = ScreenInputPort
 			m.portInput = ""
@@ -789,10 +797,17 @@ func (m Model) handleTypeSelectKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.screen = ScreenSelectHost
 		return m, nil
+	case "up", "k":
+		if m.typeCursor > 0 {
+			m.typeCursor--
+		}
+	case "down", "j":
+		if m.typeCursor < len(items)-1 {
+			m.typeCursor++
+		}
 	}
-	var cmd tea.Cmd
-	m.typeList, cmd = m.typeList.Update(msg)
-	return m, cmd
+	m.typeScroll = clampScroll(m.typeCursor, m.typeScroll, selectListHeight(m.height, typeListHeight))
+	return m, nil
 }
 
 func (m Model) buildSSHConfig() *platform.SSHConfig {
@@ -884,9 +899,9 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.portInput = string([]rune(m.portInput)[:len([]rune(m.portInput))-1])
 		}
 	default:
-		if msg.Type == tea.KeyRunes {
+		if text := msg.Key().Text; text != "" {
 			allowAddr := m.selectedType == tunnel.Remote || m.selectedType == tunnel.Local
-			for _, r := range msg.Runes {
+			for _, r := range text {
 				if validPortInputRune(r, allowAddr) {
 					m.portInput += string(r)
 				}
@@ -896,7 +911,13 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	view := tea.NewView(m.renderView())
+	view.AltScreen = true
+	return view
+}
+
+func (m Model) renderView() string {
 	var b strings.Builder
 
 	width := renderWidth(m.width)
@@ -904,23 +925,16 @@ func (m Model) View() string {
 
 	var title string
 	if m.screen == ScreenSFTP {
-		title = fmt.Sprintf(" inTun SFTP - %s", m.sftpHostLabel)
+		title = fmt.Sprintf("inTun SFTP  %s", m.sftpHostLabel)
 	} else {
-		title = fmt.Sprintf(" inTun - Interactive SSH Tunnel (%s)", m.version)
+		title = "inTun  Interactive SSH Tunnel"
 	}
-	titleInnerWidth := width - 2
-	title = truncate(title, titleInnerWidth)
-	titlePadding := titleInnerWidth - lipgloss.Width(title)
-	if titlePadding > 0 {
-		title = title + strings.Repeat(" ", titlePadding)
-	}
-	b.WriteString(titleStyle.Render(title))
+	b.WriteString(renderTopBar(width, title, m.screenName(), m.version))
 	b.WriteString("\n")
 
-	if m.screen == ScreenSFTP {
-		b.WriteString(m.renderSFTPTabBar(width))
+	if m.screen != ScreenSFTP {
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 
 	if m.err != nil {
 		b.WriteString(errorStyle.Render("Error: " + truncate(m.err.Error(), width-7)))
@@ -931,9 +945,9 @@ func (m Model) View() string {
 	case ScreenMain:
 		b.WriteString(m.renderMainScreen())
 	case ScreenSelectHost:
-		b.WriteString(m.hostList.View())
+		b.WriteString(m.renderHostSelect())
 	case ScreenSelectType:
-		b.WriteString(m.typeList.View())
+		b.WriteString(m.renderTypeSelect())
 	case ScreenInputPort:
 		b.WriteString(m.renderPortInput())
 	case ScreenSFTP:
@@ -986,139 +1000,72 @@ func (m Model) View() string {
 	return content
 }
 
+func (m Model) screenName() string {
+	switch m.screen {
+	case ScreenMain:
+		return "TUNNELS"
+	case ScreenSelectHost:
+		return "HOSTS"
+	case ScreenSelectType:
+		return "TYPES"
+	case ScreenInputPort:
+		return "PORT"
+	case ScreenSFTP:
+		return "SFTP"
+	default:
+		return ""
+	}
+}
+
+func renderTopBar(width int, title, mode, version string) string {
+	left := titleStyle.Render(" " + title + " ")
+	versionPill := lipgloss.NewStyle().
+		Background(colorSurface).
+		Foreground(colorMuted).
+		Padding(0, 1).
+		Render(version)
+	modePill := lipgloss.NewStyle().
+		Background(colorAccent).
+		Foreground(colorPanel).
+		Bold(true).
+		Padding(0, 1).
+		Render(mode)
+	right := mutedStyle.Render(time.Now().Format("15:04"))
+	centerWidth := width - lipgloss.Width(left) - lipgloss.Width(versionPill) - lipgloss.Width(modePill) - lipgloss.Width(right)
+	if centerWidth < 1 {
+		centerWidth = 1
+	}
+	rule := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		PaddingChar('─').
+		Width(centerWidth).
+		Render("")
+	return lipgloss.JoinHorizontal(lipgloss.Center, left, versionPill, modePill, rule, right)
+}
+
 func (m Model) renderMainScreen() string {
 	var b strings.Builder
 	tunnels := m.manager.List()
 
 	if len(tunnels) == 0 {
-		b.WriteString(headerStyle.Render("No tunnels active. Press 'c' to create one."))
-		b.WriteString("\n")
-		return b.String()
+		empty := panelStyle(renderWidth(m.width), 5, false).
+			Render(lipgloss.Place(0, 3, lipgloss.Center, lipgloss.Center, mutedStyle.Render("No tunnels active. Press 'c' to create one.")))
+		return empty + "\n"
 	}
 
 	lineWidth := renderWidth(m.width)
-	layout := newTableLayout(lineWidth)
-	separator := strings.Repeat("=", lineWidth)
+	contentWidth := lineWidth - 2
+	if contentWidth < 60 {
+		contentWidth = lineWidth
+	}
 
-	header := fmt.Sprintf("  %-4s %-*s   %-13s %-*s %-*s %-*s %-*s",
-		"#", layout.nameW, "Name", "Status",
-		layout.typeW, "Type",
-		layout.addrW, "Local",
-		layout.addrW, "Remote",
-		layout.latencyW, "Latency")
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n")
-	b.WriteString(lineStyle.Render(separator))
+	b.WriteString(m.renderTunnelSummary(contentWidth, len(tunnels)))
 	b.WriteString("\n")
 
 	for i, t := range tunnels {
-		var status string
-		var badgeStyle lipgloss.Style
-		switch t.Status {
-		case tunnel.StatusRunning:
-			status = "Running"
-			badgeStyle = runningBadgeStyle
-		case tunnel.StatusError:
-			status = "Error"
-			badgeStyle = errorBadgeStyle
-		case tunnel.StatusConnecting:
-			status = "Connecting"
-			badgeStyle = connectingBadgeStyle
-		case tunnel.StatusStopped:
-			status = "Stopped"
-			badgeStyle = stoppedBadgeStyle
-		}
-
-		remote := "-"
-		if t.Type == tunnel.Dynamic {
-			remote = "SOCKS5"
-		} else if t.RemotePort != "" {
-			remote = formatTunnelAddr(t.RemotePort)
-		}
-		local := formatTunnelAddr(t.LocalPort)
-
-		latency := "-"
-		if t.Latency > 0 {
-			latency = fmt.Sprintf("%dms", t.Latency.Milliseconds())
-		}
-
-		prefix := "  "
-		if i == m.selectedIndex {
-			prefix = "→ "
-		}
-
-		badge := badgeStyle.Render(status)
-		badgeW := lipgloss.Width(badge)
-		badgePad := ""
-		if badgeW < colStatusW {
-			badgePad = strings.Repeat(" ", colStatusW-badgeW)
-		}
-
-		if i == m.selectedIndex {
-			plainPart := fmt.Sprintf("%s%-4d %-*s   ", prefix, t.ID, layout.nameW, truncate(t.Name, layout.nameW))
-			afterBadge := fmt.Sprintf(" %-*s %-*s %-*s %-*s",
-				layout.typeW, truncate(t.Type.String(), layout.typeW),
-				layout.addrW, truncate(local, layout.addrW),
-				layout.addrW, truncate(remote, layout.addrW),
-				layout.latencyW, truncate(latency, layout.latencyW))
-			b.WriteString(selectedStyle.Render(plainPart))
-			b.WriteString(badge)
-			b.WriteString(badgePad)
-			b.WriteString(selectedStyle.Render(afterBadge))
-		} else {
-			line := fmt.Sprintf("%s%-4d %-*s   %s%s %-*s %-*s %-*s %-*s",
-				prefix, t.ID, layout.nameW, truncate(t.Name, layout.nameW), badge, badgePad,
-				layout.typeW, truncate(t.Type.String(), layout.typeW),
-				layout.addrW, truncate(local, layout.addrW),
-				layout.addrW, truncate(remote, layout.addrW),
-				layout.latencyW, truncate(latency, layout.latencyW))
-			b.WriteString(line)
-		}
-		b.WriteString("\n")
-
-		speedLine := fmt.Sprintf("    %13s    %13s    %13s    %13s",
-			formatSpeed(t.UploadSpeed, "↑"), formatSpeed(t.DownloadSpeed, "↓"),
-			formatTotal(t.UploadBytes, "TX"), formatTotal(t.DownloadBytes, "RX"))
-		if i == m.selectedIndex {
-			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#C4B5FD")).Render(speedLine))
-		} else {
-			b.WriteString(lipgloss.NewStyle().Width(lineWidth).Foreground(lipgloss.Color("#6B7280")).Render(speedLine))
-		}
-		b.WriteString("\n")
-
-		if t.Status == tunnel.StatusError && t.Error != "" {
-			errMsg := t.Error
-			if strings.Contains(errMsg, "SSH_AUTH_FAILED") {
-				b.WriteString(errorStyle.Render("      Authentication failed. Check SSH key:"))
-				b.WriteString("\n")
-				b.WriteString(shortcutStyle.Render("      Ensure valid key in ~/.ssh/id_rsa or ~/.ssh/id_ed25519"))
-				b.WriteString("\n")
-				b.WriteString(shortcutStyle.Render("      Or specify IdentityFile in ~/.ssh/config"))
-				b.WriteString("\n")
-			} else if strings.Contains(errMsg, "SSH_CONNECTION_FAILED") {
-				b.WriteString(errorStyle.Render("      Connection failed:"))
-				b.WriteString("\n")
-				errDetail := truncate(errMsg, lineWidth-10)
-				b.WriteString(shortcutStyle.Render("      " + errDetail))
-				b.WriteString("\n")
-			} else if strings.Contains(errMsg, "HOST_KEY_NOT_CACHED") {
-				b.WriteString(errorStyle.Render("      Host key not cached. Run manually:"))
-				b.WriteString("\n")
-				cmdLine := fmt.Sprintf("      ssh %s@%s -p %s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)
-				b.WriteString(selectedStyle.Render(cmdLine))
-				b.WriteString("\n")
-			} else if strings.Contains(errMsg, "SSH_CONNECTION_LOST") {
-				b.WriteString(errorStyle.Render("      SSH connection lost - press 'r' to reconnect"))
-				b.WriteString("\n")
-			} else {
-				errLine := fmt.Sprintf("      Error: %s", truncate(errMsg, lineWidth-16))
-				b.WriteString(errorStyle.Render(errLine))
-				b.WriteString("\n")
-			}
-		}
+		b.WriteString(m.renderTunnelRow(t, i, contentWidth, i == m.selectedIndex))
 		b.WriteString("\n")
 	}
-
 	return b.String()
 }
 
@@ -1154,6 +1101,72 @@ func (m Model) renderPortInput() string {
 	return b.String()
 }
 
+func tunnelTypeItems() []typeItem {
+	return []typeItem{
+		{name: "Local (-L)", desc: "Forward local port to remote server", t: tunnel.Local},
+		{name: "Remote (-R)", desc: "Forward remote port to local server", t: tunnel.Remote},
+		{name: "Dynamic (-D)", desc: "SOCKS proxy on local port", t: tunnel.Dynamic},
+	}
+}
+
+func (m Model) renderHostSelect() string {
+	width := renderWidth(m.width)
+	height := selectListHeight(m.height, hostListHeight)
+	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, height)
+
+	var b strings.Builder
+	b.WriteString(sectionTitleStyle.Render("Select Host"))
+	b.WriteString("\n")
+	if len(m.hosts) == 0 {
+		b.WriteString(panelStyle(width-2, 5, false).Render(mutedStyle.Render("No hosts found in ~/.ssh/config")))
+		b.WriteString("\n")
+		return b.String()
+	}
+	end := min(len(m.hosts), m.hostScroll+height)
+	for i := m.hostScroll; i < end; i++ {
+		h := m.hosts[i]
+		name := h.Hostname
+		if name == "" {
+			name = h.Name
+		}
+		title := name
+		if len(h.Labels) > 0 {
+			title += "  "
+		}
+		desc := fmt.Sprintf("%s@%s:%s", h.User, h.Hostname, h.Port)
+		renderedTitle := selectedStyle.Render(truncate(title, width-4))
+		for _, label := range h.Labels {
+			renderedTitle += labelPillStyle.Render(label)
+		}
+		row := renderedTitle + "\n" + mutedStyle.Render(truncate(desc, width-4))
+		if i == m.hostCursor {
+			b.WriteString(listSelectedStyle.Width(width - 2).Render(row))
+		} else {
+			b.WriteString(listItemStyle.Width(width - 2).Render(row))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (m Model) renderTypeSelect() string {
+	width := renderWidth(m.width)
+	items := tunnelTypeItems()
+	var b strings.Builder
+	b.WriteString(sectionTitleStyle.Render("Select Tunnel Type"))
+	b.WriteString("\n")
+	for i, item := range items {
+		row := item.name + "\n" + mutedStyle.Render(item.desc)
+		if i == m.typeCursor {
+			b.WriteString(listSelectedStyle.Width(width - 2).Render(row))
+		} else {
+			b.WriteString(listItemStyle.Width(width - 2).Render(row))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func (m Model) renderPromptModal(width int) ModalView {
 	current := m.authQueue.Current()
 	if current == nil {
@@ -1168,8 +1181,8 @@ func (m Model) renderPromptModal(width int) ModalView {
 
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().
-		Background(lipgloss.Color("#EF4444")).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(colorDanger).
+		Foreground(colorSelected).
 		Bold(true).
 		Padding(0, 1).
 		Render("Auth Required"))
@@ -1212,8 +1225,8 @@ func (m Model) renderQuitConfirmModal(width int) ModalView {
 
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().
-		Background(lipgloss.Color("#F59E0B")).
-		Foreground(lipgloss.Color("#000000")).
+		Background(colorWarning).
+		Foreground(colorPanel).
 		Bold(true).
 		Padding(0, 1).
 		Render("Confirm Exit"))
@@ -1338,86 +1351,77 @@ func renderDialogBox(width, height int, msg string, hasButtons bool) string {
 func (m Model) renderShortcuts() string {
 	width := renderWidth(m.width)
 
-	var items []string
+	type command struct {
+		key   string
+		label string
+	}
+	var items []command
 	switch m.screen {
 	case ScreenMain:
-		items = []string{
-			"[" + keyStyle.Render("↑↓") + "]Navigate",
-			"[" + keyStyle.Render("c") + "]Create",
-			"[" + keyStyle.Render("f") + "]SFTP",
-			"[" + keyStyle.Render("r") + "]Reconnect",
-			"[" + keyStyle.Render("s") + "]Stop/Start",
-			"[" + keyStyle.Render("d") + "]Delete",
-			"[" + keyStyle.Render("q") + "]Quit",
+		items = []command{
+			{"↑↓", "Navigate"},
+			{"c", "Create"},
+			{"f", "SFTP"},
+			{"r", "Reconnect"},
+			{"s", "Stop/Start"},
+			{"d", "Delete"},
+			{"q", "Quit"},
 		}
 	case ScreenSelectHost, ScreenSelectType:
-		items = []string{
-			"[" + keyStyle.Render("↑↓") + "]Navigate",
-			"[" + keyStyle.Render("Enter") + "]Select",
-			"[" + keyStyle.Render("Esc") + "]Back",
+		items = []command{
+			{"↑↓", "Navigate"},
+			{"Enter", "Select"},
+			{"Esc", "Back"},
 		}
 	case ScreenInputPort:
-		items = []string{
-			"[0-9]Input Port",
-			"[" + keyStyle.Render("Enter") + "]Confirm",
-			"[" + keyStyle.Render("Esc") + "]Back",
+		items = []command{
+			{"0-9", "Input Port"},
+			{"Enter", "Confirm"},
+			{"Esc", "Back"},
 		}
 	case ScreenSFTP:
 		if m.sftpPreviewing {
-			items = []string{
-				"[" + keyStyle.Render("Esc") + "]Close Preview",
+			items = []command{
+				{"Esc", "Close Preview"},
 			}
 		} else if m.sftpTransferring {
-			items = []string{
-				"[" + keyStyle.Render("Tab") + "]Switch",
-				"[" + keyStyle.Render("↑↓") + "]Navigate",
-				"Transferring...",
-				"[" + keyStyle.Render("q") + "]Back",
+			items = []command{
+				{"Tab", "Switch"},
+				{"↑↓", "Navigate"},
+				{"●", "Transferring"},
+				{"q", "Back"},
 			}
 		} else {
-			items = []string{
-				"[" + keyStyle.Render("Tab") + "]Switch",
-				"[" + keyStyle.Render("↑↓") + "]Navigate",
-				"[" + keyStyle.Render("Enter") + "]Open",
-				"[" + keyStyle.Render("s") + "]Sync",
-				"[" + keyStyle.Render("r") + "]Sync Dir",
-				"[" + keyStyle.Render("n") + "]Rename",
-				"[" + keyStyle.Render("v") + "]Preview",
-				"[" + keyStyle.Render("q") + "]Back",
+			items = []command{
+				{"Tab", "Switch"},
+				{"↑↓", "Navigate"},
+				{"Enter", "Open"},
+				{"s", "Sync"},
+				{"r", "Sync Dir"},
+				{"n", "Rename"},
+				{"v", "Preview"},
+				{"q", "Back"},
 			}
 		}
 	}
 
-	totalItemWidth := 0
+	segments := make([]string, 0, len(items))
 	for _, item := range items {
-		totalItemWidth += lipgloss.Width(item)
+		segments = append(segments, commandSegment(item.key, item.label))
 	}
-
-	gapCount := len(items) - 1
-	if gapCount <= 0 {
-		gapCount = 1
+	body := lipgloss.JoinHorizontal(lipgloss.Center, segments...)
+	if lipgloss.Width(body) > width {
+		body = truncateANSI(body, width)
 	}
-	gapWidth := (width - totalItemWidth) / gapCount
-	if gapWidth < 1 {
-		gapWidth = 1
-	}
+	return commandBarStyle.Width(width).Render(lipgloss.PlaceHorizontal(width-2, lipgloss.Center, body))
+}
 
-	gap := strings.Repeat(" ", gapWidth)
-
-	var result string
-	for i, item := range items {
-		result += item
-		if i < len(items)-1 {
-			result += gap
-		}
-	}
-
-	remaining := width - lipgloss.Width(result)
-	if remaining > 0 {
-		result += strings.Repeat(" ", remaining)
-	}
-
-	return shortcutStyle.Render(result)
+func commandSegment(key, label string) string {
+	return lipgloss.JoinHorizontal(lipgloss.Center,
+		commandKeyStyle.Render(key),
+		commandTextStyle.Render(label),
+		lipgloss.NewStyle().Foreground(colorMuted).PaddingRight(1).Render("·"),
+	)
 }
 
 func truncate(s string, max int) string {
@@ -1432,6 +1436,22 @@ func truncate(s string, max int) string {
 		return string(runes[:max])
 	}
 	return string(runes[:max-3]) + "..."
+}
+
+func truncateMiddle(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	left := (max - 3) / 2
+	right := max - 3 - left
+	return string(runes[:left]) + "..." + string(runes[len(runes)-right:])
 }
 
 type tableLayout struct {
@@ -1539,7 +1559,7 @@ func renderModal(screenWidth int, body string, modalWidth int) ModalView {
 	}
 
 	contentWidth := modalWidth - 4
-	border := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	border := lipgloss.NewStyle().Foreground(colorWarning)
 	lines := []string{
 		border.Render("╭" + strings.Repeat("─", modalWidth-2) + "╮"),
 		border.Render("│") + " " + strings.Repeat(" ", contentWidth) + " " + border.Render("│"),
@@ -1554,6 +1574,260 @@ func renderModal(screenWidth int, body string, modalWidth int) ModalView {
 	return ModalView{
 		content: strings.Join(lines, "\n"),
 		width:   modalWidth,
+	}
+}
+
+func panelStyle(width, height int, focused bool) lipgloss.Style {
+	style := lipgloss.NewStyle().
+		Width(width).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorSurface).
+		Padding(0, 1)
+	if height > 0 {
+		style = style.Height(height)
+	}
+	if focused {
+		style = style.BorderForegroundBlend(colorAccent, colorAccent2)
+	}
+	return style
+}
+
+func statusTextStyle(status string) lipgloss.Style {
+	switch status {
+	case "Running":
+		return successStyle
+	case "Connecting":
+		return warningStyle
+	case "Error":
+		return dangerStyle
+	case "Stopped":
+		return mutedStyle
+	default:
+		return shortcutStyle
+	}
+}
+
+func (m Model) renderTunnelSummary(width int, total int) string {
+	var running, connecting, stopped, errored int
+	var tx, rx int64
+	for _, t := range m.manager.List() {
+		switch t.GetStatus() {
+		case tunnel.StatusRunning:
+			running++
+		case tunnel.StatusConnecting:
+			connecting++
+		case tunnel.StatusStopped:
+			stopped++
+		case tunnel.StatusError:
+			errored++
+		}
+		tx += t.UploadBytes
+		rx += t.DownloadBytes
+	}
+	cards := []string{
+		metricPill("ALL", fmt.Sprintf("%d", total), accentStyle),
+		metricPill("RUN", fmt.Sprintf("%d", running), successStyle),
+		metricPill("CONN", fmt.Sprintf("%d", connecting), warningStyle),
+		metricPill("ERR", fmt.Sprintf("%d", errored), dangerStyle),
+		metricPill("STOP", fmt.Sprintf("%d", stopped), mutedStyle),
+		metricPill("FLOW", formatTotal(tx, "TX")+"  "+formatTotal(rx, "RX"), accentStyle),
+	}
+	return lipgloss.NewStyle().
+		Width(width).
+		Border(lipgloss.NormalBorder(), false, false, true, false).
+		BorderForeground(colorMuted).
+		PaddingBottom(1).
+		Render(lipgloss.JoinHorizontal(lipgloss.Center, cards...))
+}
+
+func metricPill(label, value string, valueStyle lipgloss.Style) string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorMuted).
+		Padding(0, 1).
+		MarginRight(1).
+		Render(eyebrowStyle.Render(label) + " " + valueStyle.Bold(true).Render(value))
+}
+
+func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) string {
+	status := tunnelStatusLabel(t)
+	borderColor := colorSurface
+	if focused {
+		borderColor = colorAccent
+	}
+	rowTextStyle := lipgloss.NewStyle()
+	rowMutedStyle := mutedStyle
+	rowAccentStyle := accentStyle
+	rowSelectedStyle := selectedStyle
+	local := formatTunnelAddr(t.LocalPort)
+	remote := "-"
+	if t.Type == tunnel.Dynamic {
+		remote = "SOCKS5"
+	} else if t.RemotePort != "" {
+		remote = formatTunnelAddr(t.RemotePort)
+	}
+	latency := "-"
+	if t.Latency > 0 {
+		latency = fmt.Sprintf("%dms", t.Latency.Milliseconds())
+	}
+	statusBadge := lipgloss.NewStyle().
+		Foreground(colorPanel).
+		Background(statusColor(status)).
+		Bold(true).
+		Padding(0, 1).
+		Render(status)
+	textW := width - 4
+	nameMax := textW - lipgloss.Width(statusBadge) - 18
+	if nameMax < 14 {
+		nameMax = 14
+	}
+	left := rowMutedStyle.Render(fmt.Sprintf("#%d", t.ID)) + rowTextStyle.Render(" ") + rowSelectedStyle.Render(truncate(t.Name, nameMax))
+	right := statusBadge
+	first := left + lipgloss.PlaceHorizontal(textW-lipgloss.Width(left), lipgloss.Right, right)
+	uploadSpeed := formatSpeed(t.UploadSpeed, "↑")
+	downloadSpeed := formatSpeed(t.DownloadSpeed, "↓")
+	uploadTotal := formatTotal(t.UploadBytes, "TX")
+	downloadTotal := formatTotal(t.DownloadBytes, "RX")
+	metrics := fmt.Sprintf("%s %s  %s %s", uploadSpeed, downloadSpeed, uploadTotal, downloadTotal)
+	secondRight := fmt.Sprintf("%s   %s", latency, metrics)
+	rightWidth := lipgloss.Width(secondRight)
+	maxRightWidth := max(12, textW-18)
+	if rightWidth > maxRightWidth {
+		secondRight = truncate(secondRight, maxRightWidth)
+		rightWidth = lipgloss.Width(secondRight)
+	}
+	leftWidth := textW - rightWidth - 1
+	if leftWidth < 12 {
+		leftWidth = 12
+	}
+	route := fmt.Sprintf("%s → %s", local, remote)
+	typeLabel := tunnelTypeLabel(t.Type)
+	secondLeft := rowAccentStyle.Render(typeLabel) + rowTextStyle.Render("  ") + rowTextStyle.Render(truncate(route, leftWidth-lipgloss.Width(typeLabel)-2))
+	rightRendered := rowMutedStyle.Width(rightWidth).Render(secondRight)
+	second := fitLine(secondLeft, leftWidth) + " " + rightRendered
+	flow := renderTrafficFlow(m.trafficHist[t.ID], textW)
+	lines := []string{first, second, flow}
+	if t.Status == tunnel.StatusError && t.Error != "" {
+		lines = append(lines, renderTunnelErrorHint(t, textW-2)...)
+	}
+	rowStyle := lipgloss.NewStyle().
+		Width(width).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1).
+		MarginBottom(1)
+	if focused {
+		rowStyle = rowStyle.
+			BorderForegroundBlend(colorAccent, colorAccent2)
+	}
+	_ = idx
+	return rowStyle.Render(strings.Join(lines, "\n"))
+}
+
+func renderTrafficFlow(history []int64, width int) string {
+	if width < 20 {
+		width = 20
+	}
+	graphWidth := width
+	if graphWidth < 8 {
+		graphWidth = 8
+	}
+	if len(history) == 0 {
+		return mutedStyle.Render(strings.Repeat("·", graphWidth))
+	}
+	if len(history) > graphWidth {
+		history = history[len(history)-graphWidth:]
+	}
+	pad := graphWidth - len(history)
+	scale := int64(16 * 1024)
+	for _, sample := range history {
+		if sample > scale {
+			scale = sample
+		}
+	}
+	scale = max(scale, 64*1024)
+
+	blocks := []rune("▁▂▃▄▅▆▇█")
+	var b strings.Builder
+	if pad > 0 {
+		b.WriteString(mutedStyle.Render(strings.Repeat("·", pad)))
+	}
+	for _, sample := range history {
+		if sample <= 0 {
+			b.WriteString(mutedStyle.Render("·"))
+			continue
+		}
+		level := int((sample * int64(len(blocks)-1)) / scale)
+		if level < 0 {
+			level = 0
+		}
+		if level >= len(blocks) {
+			level = len(blocks) - 1
+		}
+		style := mutedStyle
+		if level >= 5 {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+		} else if level >= 3 {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#56616F"))
+		}
+		b.WriteString(style.Render(string(blocks[level])))
+	}
+	return b.String()
+}
+
+func tunnelStatusLabel(t *tunnel.Tunnel) string {
+	switch t.Status {
+	case tunnel.StatusRunning:
+		return "Running"
+	case tunnel.StatusError:
+		return "Error"
+	case tunnel.StatusConnecting:
+		return "Connecting"
+	case tunnel.StatusStopped:
+		return "Stopped"
+	default:
+		return "-"
+	}
+}
+
+func tunnelTypeLabel(t tunnel.TunnelType) string {
+	return strings.ToUpper(t.String())
+}
+
+func statusColor(status string) color.Color {
+	switch status {
+	case "Running":
+		return colorSuccess
+	case "Connecting":
+		return colorWarning
+	case "Error":
+		return colorDanger
+	case "Stopped":
+		return colorMuted
+	default:
+		return colorAccent
+	}
+}
+
+func renderTunnelErrorHint(t *tunnel.Tunnel, width int) []string {
+	errMsg := t.Error
+	switch {
+	case strings.Contains(errMsg, "SSH_AUTH_FAILED"):
+		return []string{
+			dangerStyle.Render("Authentication failed. Check SSH key:"),
+			mutedStyle.Render("Ensure valid key in ~/.ssh/id_rsa or ~/.ssh/id_ed25519, or specify IdentityFile in ~/.ssh/config"),
+		}
+	case strings.Contains(errMsg, "SSH_CONNECTION_FAILED"):
+		return []string{dangerStyle.Render("Connection failed:"), mutedStyle.Render(truncate(errMsg, width))}
+	case strings.Contains(errMsg, "HOST_KEY_NOT_CACHED"):
+		return []string{
+			dangerStyle.Render("Host key not cached. Run manually:"),
+			selectedStyle.Render(fmt.Sprintf("ssh %s@%s -p %s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)),
+		}
+	case strings.Contains(errMsg, "SSH_CONNECTION_LOST"):
+		return []string{dangerStyle.Render("SSH connection lost - press 'r' to reconnect")}
+	default:
+		return []string{dangerStyle.Render("Error: " + truncate(errMsg, width))}
 	}
 }
 
@@ -1631,12 +1905,7 @@ func truncateANSI(s string, max int) string {
 	return b.String()
 }
 
-func listDimensions(width, height, maxHeight int) (int, int) {
-	listWidth := width - 4
-	if listWidth < 20 {
-		listWidth = 20
-	}
-
+func selectListHeight(height, maxHeight int) int {
 	listHeight := height - 8
 	if listHeight > maxHeight {
 		listHeight = maxHeight
@@ -1644,7 +1913,20 @@ func listDimensions(width, height, maxHeight int) (int, int) {
 	if listHeight < 5 {
 		listHeight = 5
 	}
-	return listWidth, listHeight
+	return listHeight
+}
+
+func clampScroll(cursor, scroll, height int) int {
+	if cursor < scroll {
+		return cursor
+	}
+	if cursor >= scroll+height {
+		return cursor - height + 1
+	}
+	if scroll < 0 {
+		return 0
+	}
+	return scroll
 }
 
 func formatTunnelAddr(addr string) string {
@@ -1848,11 +2130,41 @@ func (m Model) currentSFTPFiles() []sftp.FileEntry {
 }
 
 func (m Model) sftpVisibleHeight() int {
-	h := m.height - 8
+	h := m.height - sftpChromeHeight()
+	h -= m.sftpDrawerHeight()
 	if h < 5 {
 		h = 5
 	}
 	return h
+}
+
+func sftpChromeHeight() int {
+	return 13
+}
+
+func (m Model) sftpDrawerHeight() int {
+	height := 0
+	if m.sftpRenaming {
+		height += 3
+	}
+	if m.sftpTransferring {
+		height += 4
+	}
+	if m.sftpPreviewing {
+		height += m.sftpPreviewHeight() + 3
+	}
+	return height
+}
+
+func (m Model) sftpPreviewHeight() int {
+	height := m.height / 4
+	if height < 4 {
+		height = 4
+	}
+	if height > 8 {
+		height = 8
+	}
+	return height
 }
 
 func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
@@ -2158,136 +2470,83 @@ func isBinaryContent(s string) bool {
 	return false
 }
 
-func (m Model) renderSFTPTabBar(width int) string {
-	half := width / 2
-
-	localLabel := " LOCAL "
-	remoteLabel := " REMOTE "
-
+func (m Model) renderSFTPTabBar(panelWidth int) string {
 	activeStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#7C3AED")).
-		Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+		Background(colorAccent).
+		Foreground(colorPanel).
+		Bold(true).
+		Padding(0, 3)
 	inactiveStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#313244")).
-		Foreground(lipgloss.Color("#6C7086"))
+		Foreground(colorMuted).
+		Background(colorSurface).
+		Padding(0, 3)
 
 	var left, right string
 	if m.sftpFocus == 0 {
-		left = activeStyle.Render(localLabel)
-		right = inactiveStyle.Render(remoteLabel)
+		left = activeStyle.Render("LOCAL")
+		right = inactiveStyle.Render("REMOTE")
 	} else {
-		left = inactiveStyle.Render(localLabel)
-		right = activeStyle.Render(remoteLabel)
+		left = inactiveStyle.Render("LOCAL")
+		right = activeStyle.Render("REMOTE")
 	}
 
-	leftPad := half - lipgloss.Width(left)
-	if leftPad < 0 {
-		leftPad = 0
-	}
-	rightPad := half - lipgloss.Width(right)
-	if rightPad < 0 {
-		rightPad = 0
-	}
-
-	return left + strings.Repeat(" ", leftPad) +
-		right + strings.Repeat(" ", rightPad)
+	tabs := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+	return lipgloss.PlaceHorizontal(panelWidth*2+1, lipgloss.Center, tabs)
 }
 
 func (m Model) renderSFTPScreen() string {
-	width := m.width
-	if width < minTermWidth {
-		width = 80
-	}
-	panelWidth := width/2 - 3
+	width := renderWidth(m.width)
+	panelWidth := (width - 3) / 2
 	if panelWidth < 20 {
 		panelWidth = 20
 	}
 
 	var b strings.Builder
-
-	localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, m.sftpFocus == 0)
-	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, m.sftpFocus == 1)
-
-	localLines := strings.Split(localPanel, "\n")
-	remoteLines := strings.Split(remotePanel, "\n")
-	maxLines := len(localLines)
-	if len(remoteLines) > maxLines {
-		maxLines = len(remoteLines)
-	}
-
-	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("│")
-	for i := 0; i < maxLines; i++ {
-		var left, right string
-		if i < len(localLines) {
-			left = localLines[i]
-		}
-		if i < len(remoteLines) {
-			right = remoteLines[i]
-		}
-		leftPad := panelWidth - lipgloss.Width(left)
-		if leftPad < 0 {
-			leftPad = 0
-		}
-		rightPad := panelWidth - lipgloss.Width(right)
-		if rightPad < 0 {
-			rightPad = 0
-		}
-		b.WriteString(left)
-		b.WriteString(strings.Repeat(" ", leftPad))
-		b.WriteString(" ")
-		b.WriteString(sep)
-		b.WriteString(" ")
-		b.WriteString(right)
-		b.WriteString(strings.Repeat(" ", rightPad))
-		b.WriteString("\n")
-	}
+	panelHeight := m.sftpVisibleHeight() + 2
+	b.WriteString(m.renderSFTPTabBar(panelWidth))
+	b.WriteString("\n")
+	localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, panelHeight, m.sftpFocus == 0)
+	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, panelHeight, m.sftpFocus == 1)
+	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, localPanel, " ", remotePanel))
+	b.WriteString("\n")
 
 	if m.sftpRenaming {
-		renameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
 		input := m.sftpRenameInput + "_"
 		hint := "Rename: " + input
 		confirmHint := "  [Enter]Confirm [Esc]Cancel"
-		rendered := renameStyle.Render(hint) + shortcutStyle.Render(confirmHint)
-		pad := width - lipgloss.Width(rendered)
-		if pad > 0 {
-			rendered += strings.Repeat(" ", pad)
-		}
-		b.WriteString(rendered)
+		rendered := warningStyle.Render(hint) + mutedStyle.Render(confirmHint)
+		b.WriteString(panelStyle(width-2, 0, true).Render(rendered))
 		b.WriteString("\n")
 	}
 
 	if m.sftpTransferring {
-		b.WriteString(m.renderSFTPProgress(width))
+		b.WriteString(panelStyle(width-2, 0, false).Render(m.renderSFTPProgress(width - 6)))
 		b.WriteString("\n")
 	}
 
 	if m.sftpPreviewing {
-		b.WriteString(m.renderSFTPPreview(width))
+		b.WriteString(panelStyle(width-2, m.sftpPreviewHeight()+2, true).Render(m.renderSFTPPreview(width-6, m.sftpPreviewHeight())))
 		b.WriteString("\n")
 	}
 
 	return b.String()
 }
 
-func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width int, focused bool) string {
+func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width, height int, focused bool) string {
 	var b strings.Builder
 
-	hdrStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#585B70")).Bold(true)
+	count := fmt.Sprintf("%d items", len(files))
+	title := eyebrowStyle.Render(label) + " " + mutedStyle.Render(count)
 	if focused {
-		hdrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
+		title = accentStyle.Bold(true).Render(label) + " " + mutedStyle.Render(count)
 	}
-
-	dirDisplay := truncate(dir, width-1)
-	hdrText := dirDisplay
-	visibleW := lipgloss.Width(hdrText)
-	padW := width - visibleW
-	if padW > 0 {
-		hdrText += strings.Repeat(" ", padW)
-	}
-	b.WriteString(hdrStyle.Render(hdrText))
+	title = title + lipgloss.PlaceHorizontal(width-lipgloss.Width(title)-2, lipgloss.Right, mutedStyle.Render(truncateMiddle(dir, max(10, width/2))))
+	b.WriteString(title)
+	b.WriteString("\n")
+	b.WriteString(lineStyle.Render(strings.Repeat("─", max(1, width-4))))
 	b.WriteString("\n")
 
-	visibleHeight := m.height - 8
+	visibleHeight := height - 4
 	if visibleHeight < 5 {
 		visibleHeight = 5
 	}
@@ -2304,99 +2563,103 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 	totalEntries := len(files) + 1
 	renderIdx := 0
 	for i := scroll; i < totalEntries && renderIdx < visibleHeight; i++ {
-		var name, sizeStr string
-		var isDir bool
-
-		if i == 0 {
-			name = ".."
-			isDir = true
-		} else {
-			idx := i - 1
-			if idx >= len(files) {
-				break
-			}
-			entry := files[idx]
-			name = entry.Name
-			isDir = entry.IsDir
-			if !isDir && entry.Size > 0 {
-				sizeStr = formatBytes(entry.Size)
-			}
-		}
-
-		displayName := name
-		if isDir && i > 0 {
-			displayName = name + "/"
-		}
-
-		prefix := "  "
-		if i == cursor {
-			prefix = "❯ "
-		}
-
-		var line string
-		if sizeStr != "" {
-			nameWidth := width - 3 - len(sizeStr)
-			if nameWidth < 5 {
-				nameWidth = 5
-			}
-			truncated := truncate(displayName, nameWidth)
-			padLen := width - 3 - len(truncated) - len(sizeStr)
-			if padLen < 1 {
-				padLen = 1
-			}
-			line = prefix + truncated + strings.Repeat(" ", padLen) + sizeStr
-		} else {
-			line = prefix + truncate(displayName, width-3)
-		}
-
-		if i == cursor && focused {
-			linePad := width - lipgloss.Width(line)
-			if linePad > 0 {
-				line += strings.Repeat(" ", linePad)
-			}
-			b.WriteString(selectedStyle.Render(line))
-		} else if i == cursor {
-			linePad := width - lipgloss.Width(line)
-			if linePad > 0 {
-				line += strings.Repeat(" ", linePad)
-			}
-			if isDir {
-				b.WriteString(dirStyle.Render(line))
-			} else {
-				b.WriteString(inactiveStyle.Render(line))
-			}
-		} else {
-			linePad := width - lipgloss.Width(line)
-			if linePad > 0 {
-				line += strings.Repeat(" ", linePad)
-			}
-			if isDir {
-				b.WriteString(dirStyle.Render(line))
-			} else {
-				b.WriteString(shortcutStyle.Render(line))
-			}
-		}
+		b.WriteString(m.renderSFTPEntryLine(files, i, cursor, width, focused))
+		b.WriteString("\n")
+		renderIdx++
+	}
+	for renderIdx < visibleHeight {
+		b.WriteString(mutedStyle.Render(strings.Repeat(" ", max(1, width-4))))
 		b.WriteString("\n")
 		renderIdx++
 	}
 
-	return b.String()
+	return panelStyle(width, height, focused).Render(b.String())
 }
 
-func (m Model) renderSFTPPreview(width int) string {
+func (m Model) renderSFTPEntryLine(files []sftp.FileEntry, i, cursor, width int, focused bool) string {
+	var name, sizeStr string
+	var isDir bool
+
+	if i == 0 {
+		name = ".."
+		isDir = true
+	} else {
+		idx := i - 1
+		if idx >= len(files) {
+			return ""
+		}
+		entry := files[idx]
+		name = entry.Name
+		isDir = entry.IsDir
+		if !isDir && entry.Size > 0 {
+			sizeStr = formatBytes(entry.Size)
+		}
+	}
+
+	displayName := name
+	if isDir && i > 0 {
+		displayName = name + "/"
+	}
+
+	prefix := "  "
+	if i == cursor {
+		prefix = "❯ "
+	}
+	marker := " "
+	if isDir {
+		marker = "/"
+	}
+
+	var line string
+	if sizeStr != "" {
+		nameWidth := width - 8 - len(sizeStr)
+		if nameWidth < 5 {
+			nameWidth = 5
+		}
+		truncated := truncate(displayName, nameWidth)
+		padLen := width - 8 - lipgloss.Width(truncated) - len(sizeStr)
+		if padLen < 1 {
+			padLen = 1
+		}
+		line = prefix + marker + " " + truncated + strings.Repeat(" ", padLen) + sizeStr
+	} else {
+		line = prefix + marker + " " + truncate(displayName, width-8)
+	}
+
+	linePad := width - 4 - lipgloss.Width(line)
+	if linePad > 0 {
+		line += strings.Repeat(" ", linePad)
+	}
+
+	if i == cursor && focused {
+		return lipgloss.NewStyle().Foreground(colorSelected).Background(colorPanelHi).Bold(true).Render(line)
+	}
+	if i == cursor {
+		if isDir {
+			return dirStyle.Render(line)
+		} else {
+			return inactiveStyle.Render(line)
+		}
+	}
+	if isDir {
+		return dirStyle.Render(line)
+	}
+	return shortcutStyle.Render(line)
+}
+
+func (m Model) renderSFTPPreview(width, maxLines int) string {
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true).Render("── Preview ──"))
+	b.WriteString(accentStyle.Bold(true).Render("Preview"))
 	b.WriteString("\n")
 
 	lines := strings.Split(m.sftpPreview, "\n")
-	maxLines := 20
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
 	}
 
-	previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Width(width - 4)
+	previewStyle := lipgloss.NewStyle().Foreground(colorText).Width(width)
 	for _, line := range lines {
-		displayLine := truncate(line, width-4)
+		displayLine := truncate(line, width)
 		b.WriteString(previewStyle.Render(displayLine))
 		b.WriteString("\n")
 	}
@@ -2424,15 +2687,33 @@ func (m Model) renderSFTPProgress(width int) string {
 		speedStr = " " + formatTransferSpeed(p.Speed)
 	}
 
-	barWidth := width - 6
+	barWidth := width
 	if barWidth < 20 {
 		barWidth = 20
 	}
-	barModel := m.sftpProgressBar
-	barModel.Width = barWidth
 
-	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-	infoLine := infoStyle.Render(fmt.Sprintf("%s %s %.0f%%%s", m.sftpDirection, p.File, pct*100, speedStr))
+	infoLine := warningStyle.Render(fmt.Sprintf("%s %s %.0f%%%s", m.sftpDirection, p.File, pct*100, speedStr))
 
-	return infoLine + "\n" + barModel.ViewAs(pct)
+	return infoLine + "\n" + renderProgressBar(pct, barWidth)
+}
+
+func renderProgressBar(pct float64, width int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 1 {
+		pct = 1
+	}
+	if width < 1 {
+		return ""
+	}
+	filled := int(float64(width) * pct)
+	if pct > 0 && filled == 0 {
+		filled = 1
+	}
+	if filled > width {
+		filled = width
+	}
+	bar := successStyle.Render(strings.Repeat("━", filled)) + mutedStyle.Render(strings.Repeat("━", width-filled))
+	return bar
 }

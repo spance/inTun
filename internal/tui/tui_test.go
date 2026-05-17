@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/google/go-cmp/cmp"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
@@ -12,27 +12,27 @@ import (
 )
 
 func keyMsg(s string) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+	return tea.KeyPressMsg(tea.Key{Text: s, Code: []rune(s)[0]})
 }
 
 func keyEnter() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyEnter}
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter})
 }
 
 func keyEsc() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyEsc}
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc})
 }
 
 func keyDown() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyDown}
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyDown})
 }
 
 func keyUp() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyUp}
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyUp})
 }
 
 func keyBackspace() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyBackspace}
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
 }
 
 func updateModel(m Model, msg tea.Msg) Model {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
 	"github.com/spance/intun/internal/sftp"
@@ -36,7 +36,7 @@ func newTestModelWithTunnel() Model {
 
 func TestViewContainsTitle(t *testing.T) {
 	m := newTestModelWithTunnel()
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "inTun") {
@@ -49,7 +49,7 @@ func TestViewContainsTitle(t *testing.T) {
 
 func TestViewContainsShortcuts(t *testing.T) {
 	m := newTestModelWithTunnel()
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	shortcuts := []string{"Navigate", "Create", "Reconnect", "Quit"}
@@ -62,13 +62,13 @@ func TestViewContainsShortcuts(t *testing.T) {
 
 func TestViewTunnelList(t *testing.T) {
 	m := newTestModelWithTunnel()
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "test-tunnel") {
 		t.Error("View output should contain tunnel name")
 	}
-	if !strings.Contains(clean, "Local") {
+	if !strings.Contains(clean, "LOCAL") {
 		t.Error("View output should contain tunnel type")
 	}
 	if !strings.Contains(clean, ":8080") {
@@ -85,7 +85,7 @@ func TestViewDoesNotPrefixHostPortAddressWithExtraColon(t *testing.T) {
 	tun.LocalPort = "127.0.0.1:5555"
 	tun.RemotePort = "10.0.0.15:5551"
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if strings.Contains(clean, ":127.0.0.1:5555") {
@@ -111,7 +111,7 @@ func TestViewTableFitsMinimumWidth(t *testing.T) {
 	tun.LocalPort = "127.0.0.1:555555555555"
 	tun.RemotePort = "10.0.0.15:555155555555"
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	for _, line := range strings.Split(clean, "\n") {
@@ -127,7 +127,7 @@ func TestViewNoTunnelsMessage(t *testing.T) {
 	m.width = 100
 	m.height = 30
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "No tunnels active") {
@@ -142,7 +142,7 @@ func TestViewDisplaysModelError(t *testing.T) {
 	m := newTestModelWithTunnel()
 	m.err = fmt.Errorf("no hosts found in ~/.ssh/config")
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Error: no hosts found") {
@@ -155,7 +155,7 @@ func TestViewTunnelStatus(t *testing.T) {
 	tun := m.manager.List()[0]
 
 	tun.UpdateStats(1024, 2048, 100, 200, 50*1000000, false)
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Running") {
@@ -173,7 +173,7 @@ func TestViewErrorState(t *testing.T) {
 	tun.Status = tunnel.StatusError
 	tun.Error = "SSH_CONNECTION_FAILED: connection refused"
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Error") {
@@ -191,7 +191,7 @@ func TestViewHostKeyError(t *testing.T) {
 	tun.Status = tunnel.StatusError
 	tun.Error = "HOST_KEY_NOT_CACHED: unknown host"
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Host key not cached") {
@@ -206,7 +206,7 @@ func TestViewAuthError(t *testing.T) {
 	tun.Status = tunnel.StatusError
 	tun.Error = "SSH_AUTH_FAILED: no valid key"
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Authentication failed") {
@@ -222,7 +222,7 @@ func TestViewPortInputScreen(t *testing.T) {
 	m.screen = ScreenInputPort
 	m.portInput = "808"
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Port") {
@@ -243,7 +243,7 @@ func TestViewHostSelectScreen(t *testing.T) {
 	m.height = 30
 	m.screen = ScreenSelectHost
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Select Host") {
@@ -258,7 +258,7 @@ func TestViewTypeSelectScreen(t *testing.T) {
 	m := newTestModelWithTunnel()
 	m.screen = ScreenSelectType
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Select Tunnel Type") {
@@ -277,7 +277,7 @@ func TestViewTypeSelectScreen(t *testing.T) {
 
 func TestViewPromptModeHostKey(t *testing.T) {
 	m := newTestModelWithTunnel()
-	normal := stripANSI(m.View())
+	normal := stripANSI(m.View().Content)
 	m.promptMode = true
 
 	respChan := make(chan platform.AuthResponse, 1)
@@ -290,7 +290,7 @@ func TestViewPromptModeHostKey(t *testing.T) {
 	m.authQueue.requestChan <- req
 	m.authQueue.Poll()
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Auth Required") {
@@ -325,7 +325,7 @@ func TestViewPromptModePassword(t *testing.T) {
 	m.authQueue.requestChan <- req
 	m.authQueue.Poll()
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Password") {
@@ -357,7 +357,7 @@ func TestViewPromptOverlayFitsMinimumWidth(t *testing.T) {
 	m.authQueue.requestChan <- req
 	m.authQueue.Poll()
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	for _, line := range strings.Split(clean, "\n") {
@@ -369,10 +369,10 @@ func TestViewPromptOverlayFitsMinimumWidth(t *testing.T) {
 
 func TestViewQuitConfirmOverlay(t *testing.T) {
 	m := newTestModelWithTunnel()
-	normal := stripANSI(m.View())
+	normal := stripANSI(m.View().Content)
 	m.confirmQuit = true
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Confirm Exit") {
@@ -391,7 +391,7 @@ func TestViewQuitConfirmOverlay(t *testing.T) {
 
 func TestRenderModalKeepsBorderAligned(t *testing.T) {
 	body := strings.Join([]string{
-		lipgloss.NewStyle().Background(lipgloss.Color("#F59E0B")).Render("Confirm Exit"),
+		lipgloss.NewStyle().Background(lipgloss.Color("#D29922")).Render("Confirm Exit"),
 		"",
 		"Active tunnels are still running",
 		"this line is intentionally much longer than the modal content width and should be clipped",
@@ -415,7 +415,7 @@ func TestRenderModalKeepsBorderAligned(t *testing.T) {
 
 func TestOverlayCentersModalAsSingleBlock(t *testing.T) {
 	modal := renderModal(120, strings.Join([]string{
-		lipgloss.NewStyle().Background(lipgloss.Color("#F59E0B")).Render("Confirm Exit"),
+		lipgloss.NewStyle().Background(lipgloss.Color("#D29922")).Render("Confirm Exit"),
 		"Active tunnels are still running",
 		"[Enter/Y/Q] Exit    [Esc/N] Cancel",
 	}, "\n"), 56)
@@ -451,7 +451,7 @@ func TestViewDynamicTunnel(t *testing.T) {
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	m.manager.Create("socks-proxy", cfg, tunnel.Dynamic, "1080", "")
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "SOCKS5") {
@@ -461,7 +461,7 @@ func TestViewDynamicTunnel(t *testing.T) {
 
 func TestANSIStylesPresent(t *testing.T) {
 	m := newTestModelWithTunnel()
-	output := m.View()
+	output := m.View().Content
 
 	hasStyling := ansiRegex.MatchString(output) || strings.Contains(output, "Running")
 	if !hasStyling {
@@ -475,7 +475,7 @@ func TestViewSelectedTunnel(t *testing.T) {
 	m.manager.Create("second-tunnel", cfg, tunnel.Local, "9090", "90")
 
 	m.selectedIndex = 1
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "second-tunnel") {
@@ -488,7 +488,7 @@ func TestViewLatencyDisplay(t *testing.T) {
 	tun := m.manager.List()[0]
 
 	tun.Latency = 45 * 1000000 // 45ms
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "45ms") {
@@ -501,7 +501,7 @@ func TestViewStoppedTunnel(t *testing.T) {
 	tun := m.manager.List()[0]
 	tun.Status = tunnel.StatusStopped
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Stopped") {
@@ -513,7 +513,7 @@ func TestViewStatusMessage(t *testing.T) {
 	m := newTestModelWithTunnel()
 	m.statusMsg = "Tunnel must be running"
 	m.statusTicks = 3
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 	if !strings.Contains(clean, "Tunnel must be running") {
 		t.Error("View should show status message")
@@ -525,7 +525,7 @@ func TestViewSFTPShortcuts(t *testing.T) {
 	m.screen = ScreenSFTP
 	m.sftpLocalFiles = []sftp.FileEntry{{Name: "test.txt", IsDir: false}}
 	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "remote.txt", IsDir: false}}
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 	for _, s := range []string{"Sync", "Sync Dir", "Rename", "Preview", "Back"} {
 		if !strings.Contains(clean, s) {
@@ -538,14 +538,14 @@ func TestQuitConfirmWithRunningTunnel(t *testing.T) {
 	m := newTestModelWithTunnel()
 	tun := m.manager.List()[0]
 	tun.Status = tunnel.StatusRunning
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 	if strings.Contains(clean, "Active tunnels are still running") {
 		t.Error("Should not show quit confirmation before pressing q")
 	}
 
 	m.confirmQuit = true
-	output = m.View()
+	output = m.View().Content
 	clean = stripANSI(output)
 	if !strings.Contains(clean, "Active tunnels are still running") {
 		t.Error("Should show quit confirmation when confirmQuit is true")
@@ -559,7 +559,7 @@ func TestViewSFTPRenameInput(t *testing.T) {
 	m.sftpRemoteFiles = []sftp.FileEntry{}
 	m.sftpRenaming = true
 	m.sftpRenameInput = "new.txt"
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 	if !strings.Contains(clean, "Rename: new.txt_") {
 		t.Error("Should show rename input")
@@ -574,7 +574,7 @@ func TestViewConnectingTunnel(t *testing.T) {
 	tun := m.manager.List()[0]
 	tun.Status = tunnel.StatusConnecting
 
-	output := m.View()
+	output := m.View().Content
 	clean := stripANSI(output)
 
 	if !strings.Contains(clean, "Connecting") {
