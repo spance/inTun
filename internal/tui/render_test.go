@@ -437,6 +437,50 @@ func TestOverlayCentersModalAsSingleBlock(t *testing.T) {
 	}
 }
 
+func TestOverlayMasksBaseOutsideModal(t *testing.T) {
+	baseLines := make([]string, 12)
+	for i := range baseLines {
+		baseLines[i] = fmt.Sprintf("base-row-%02d", i)
+	}
+	base := strings.Join(baseLines, "\n")
+	modal := renderModal(80, "Confirm Exit", 32)
+
+	clean := stripANSI(overlayCentered(base, modal, 80, 12))
+	lines := strings.Split(clean, "\n")
+	if strings.Contains(clean, "base-row") {
+		t.Fatalf("full-screen mask should hide base content:\n%s", clean)
+	}
+	if strings.TrimSpace(lines[0]) != "" {
+		t.Fatalf("top mask row should be blank: %q", lines[0])
+	}
+	if strings.HasPrefix(strings.TrimLeft(lines[0], " "), "+") || strings.Contains(lines[0], "Confirm Exit") {
+		t.Fatalf("modal should not be placed at top row: %q", lines[0])
+	}
+}
+
+func TestOverlayMasksModalRows(t *testing.T) {
+	baseLines := make([]string, 12)
+	for i := range baseLines {
+		baseLines[i] = "background-list-item-border"
+	}
+	base := strings.Join(baseLines, "\n")
+	modal := renderModal(80, "Confirm Exit", 32)
+
+	clean := stripANSI(overlayCentered(base, modal, 80, 12))
+	for _, line := range strings.Split(clean, "\n") {
+		if strings.Contains(line, "Confirm Exit") {
+			if strings.Contains(line, "background-list-item-border") {
+				t.Fatalf("modal row should mask background content: %q", line)
+			}
+			if strings.Contains(line, "...") {
+				t.Fatalf("modal row should not contain truncation dots: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatal("expected modal content")
+}
+
 func lineIndex(s, needle string) int {
 	for i, line := range strings.Split(s, "\n") {
 		if strings.Contains(line, needle) {
@@ -531,6 +575,42 @@ func TestViewSFTPShortcuts(t *testing.T) {
 		if !strings.Contains(clean, s) {
 			t.Errorf("SFTP view should contain shortcut '%s'", s)
 		}
+	}
+}
+
+func TestViewSFTPNoTabBar(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "test.txt", IsDir: false}}
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "remote.txt", IsDir: false}}
+
+	clean := stripANSI(m.View().Content)
+	lines := strings.Split(clean, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected SFTP view lines, got %d", len(lines))
+	}
+	if strings.Contains(lines[1], "LOCAL") || strings.Contains(lines[1], "REMOTE") {
+		t.Fatalf("SFTP should not render a standalone tab row: %q", lines[1])
+	}
+	if !strings.Contains(clean, "LOCAL") || !strings.Contains(clean, "REMOTE") {
+		t.Fatal("SFTP panel labels should remain visible")
+	}
+}
+
+func TestViewSFTPStatusUsesModalMask(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "panel-local.bin", IsDir: false}}
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "panel-remote.bin", IsDir: false}}
+	m.statusMsg = "SFTP upload complete\nFROM: /local/test.txt\nTO: /remote/test.txt"
+	m.statusTicks = 3
+
+	clean := stripANSI(m.View().Content)
+	if !strings.Contains(clean, "Notice") || !strings.Contains(clean, "SFTP upload complete") {
+		t.Fatalf("expected SFTP status modal, got:\n%s", clean)
+	}
+	if strings.Contains(clean, "panel-local.bin") || strings.Contains(clean, "panel-remote.bin") {
+		t.Fatalf("SFTP modal mask should hide panel content:\n%s", clean)
 	}
 }
 

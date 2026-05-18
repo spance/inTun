@@ -1,6 +1,11 @@
 package tui
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +13,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
+	"github.com/spance/intun/internal/sftp"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -33,6 +39,14 @@ func keyUp() tea.KeyMsg {
 
 func keyBackspace() tea.KeyMsg {
 	return tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
+}
+
+func keyPgDown() tea.KeyMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyPgDown})
+}
+
+func keyPgUp() tea.KeyMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyPgUp})
 }
 
 func updateModel(m Model, msg tea.Msg) Model {
@@ -126,6 +140,45 @@ func TestModelBackNavigation(t *testing.T) {
 	m = updateModel(m, keyEsc())
 	if m.screen != ScreenSelectType {
 		t.Errorf("Esc from port input should return to type select, got %v", m.screen)
+	}
+}
+
+func TestHostSelectScrollsLongList(t *testing.T) {
+	hosts := make([]config.Host, 40)
+	for i := range hosts {
+		hosts[i] = config.Host{
+			Name:     fmt.Sprintf("host-%02d", i),
+			Hostname: fmt.Sprintf("host-%02d.example.com", i),
+			User:     "user",
+			Port:     "22",
+		}
+	}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 20
+	m.screen = ScreenSelectHost
+
+	visible := hostSelectVisibleItems(m.height)
+	if visible >= len(hosts) {
+		t.Fatalf("visible items = %d, want fewer than host count", visible)
+	}
+
+	m = updateModel(m, keyPgDown())
+	if m.hostCursor != visible {
+		t.Fatalf("hostCursor = %d, want %d after PgDown", m.hostCursor, visible)
+	}
+	if m.hostScroll == 0 {
+		t.Fatal("hostScroll should move after PgDown")
+	}
+
+	clean := stripANSI(m.renderHostSelect())
+	if !strings.Contains(clean, fmt.Sprintf("%d-", m.hostScroll+1)) {
+		t.Fatalf("host list should render scroll range, got:\n%s", clean)
+	}
+
+	m = updateModel(m, keyPgUp())
+	if m.hostCursor != 0 {
+		t.Fatalf("hostCursor = %d, want 0 after PgUp", m.hostCursor)
 	}
 }
 
@@ -656,6 +709,234 @@ func TestFormatBytes(t *testing.T) {
 		if diff := cmp.Diff(got, tt.want); diff != "" {
 			t.Errorf("formatBytes(%d) mismatch (-want +got):\n%s", tt.bytes, diff)
 		}
+	}
+}
+
+func TestSFTPTransferErrorSetsStatus(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.screen = ScreenSFTP
+	m.sftpTransferring = true
+	m.sftpProgress = sftp.NewProgressInfo("file.txt", 100)
+	m.sftpDone = make(chan sftpTransferResult, 1)
+	m.sftpDone <- sftpTransferResult{err: fmt.Errorf("permission denied")}
+
+	m = updateModel(m, tickMsg{})
+
+	if m.sftpTransferring {
+		t.Fatal("transfer should be marked complete after result")
+	}
+	if m.sftpDone != nil {
+		t.Fatal("sftpDone should be cleared after result")
+	}
+	if m.statusMsg == "" || !strings.Contains(m.statusMsg, "permission denied") {
+		t.Fatalf("statusMsg = %q, want transfer error", m.statusMsg)
+	}
+	if !strings.Contains(m.statusMsg, "FROM:") || !strings.Contains(m.statusMsg, "TO:") {
+		t.Fatalf("statusMsg = %q, want source and target context", m.statusMsg)
+	}
+	if m.sftpProgress.Snapshot().Active {
+		t.Fatal("progress should be inactive after result")
+	}
+}
+
+func TestStaleSFTPTransferResultIsIgnored(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.screen = ScreenSFTP
+	m.sftpTransferID = 2
+	m.sftpTransferring = true
+	m.sftpProgress = sftp.NewProgressInfo("file.txt", 100)
+	m.sftpDone = make(chan sftpTransferResult, 1)
+	m.sftpDone <- sftpTransferResult{id: 1, err: fmt.Errorf("old failure"), direction: "upload"}
+
+	m = updateModel(m, tickMsg{})
+
+	if !m.sftpTransferring {
+		t.Fatal("stale transfer result should not stop the current transfer")
+	}
+	if m.statusMsg != "" {
+		t.Fatalf("stale transfer result set statusMsg = %q", m.statusMsg)
+	}
+	if m.sftpDone != nil {
+		t.Fatal("stale done channel should be cleared")
+	}
+}
+
+func TestFormatSFTPTransferMessages(t *testing.T) {
+	result := sftpTransferResult{
+		err:       context.Canceled,
+		source:    "/local/file.txt",
+		target:    "/remote/file.txt",
+		direction: "upload",
+	}
+	if got := formatSFTPTransferError(result); got != "SFTP upload cancelled" {
+		t.Fatalf("cancel message = %q", got)
+	}
+
+	result.err = nil
+	got := formatSFTPTransferSuccess(result)
+	if !strings.Contains(got, "SFTP upload complete") || !strings.Contains(got, "FROM: /local/file.txt") || !strings.Contains(got, "TO: /remote/file.txt") {
+		t.Fatalf("success message = %q", got)
+	}
+}
+
+func TestSFTPScrollStateTracksCursor(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.height = 18
+	for i := 0; i < 30; i++ {
+		m.sftpLocalFiles = append(m.sftpLocalFiles, sftp.FileEntry{Name: fmt.Sprintf("file-%02d.txt", i)})
+	}
+
+	for i := 0; i < 15; i++ {
+		m = updateModel(m, keyDown())
+	}
+
+	visible := m.sftpListVisibleItems()
+	if m.sftpScroll[0] == 0 {
+		t.Fatal("scroll should advance when cursor moves below the visible list")
+	}
+	if m.sftpCursor[0] < m.sftpScroll[0] || m.sftpCursor[0] >= m.sftpScroll[0]+visible {
+		t.Fatalf("cursor %d should be visible in scroll window [%d,%d)", m.sftpCursor[0], m.sftpScroll[0], m.sftpScroll[0]+visible)
+	}
+}
+
+func TestSFTPPanelHeightMatchesVisibleRows(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.height = 24
+
+	if got, want := m.sftpPanelHeight()-sftpPanelRowsAroundList, m.sftpListVisibleItems(); got != want {
+		t.Fatalf("panel list rows = %d, want %d", got, want)
+	}
+
+	m.sftpTransferring = true
+	if got, want := m.sftpPanelHeight()-sftpPanelRowsAroundList, m.sftpListVisibleItems(); got != want {
+		t.Fatalf("panel list rows with drawer = %d, want %d", got, want)
+	}
+}
+
+func TestRefreshSFTPFilesReportsLocalError(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpLocalDir = filepath.Join(t.TempDir(), "missing")
+	m.sftpRemoteDir = "/"
+
+	_, err := m.refreshSFTPFiles()
+	if err == nil {
+		t.Fatal("refreshSFTPFiles should report refresh failures")
+	}
+	if !strings.Contains(err.Error(), "local:") {
+		t.Fatalf("refresh error = %v, want local context", err)
+	}
+}
+
+func TestReadPreviewBytesLimitsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 8192)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readPreviewBytes(path, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 4096 {
+		t.Fatalf("preview length = %d, want 4096", len(data))
+	}
+}
+
+func TestValidateRenameNameRejectsPaths(t *testing.T) {
+	for _, name := range []string{"../x", "dir/file", `dir\file`, ".", "..", " padded"} {
+		if err := validateRenameName(name); err == nil {
+			t.Fatalf("validateRenameName(%q) should reject invalid file names", name)
+		}
+	}
+	if err := validateRenameName("renamed.txt"); err != nil {
+		t.Fatalf("validateRenameName valid name returned %v", err)
+	}
+}
+
+func TestSFTPConfirmRenameRejectsPathInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldPath := filepath.Join(tmpDir, "old.txt")
+	if err := os.WriteFile(oldPath, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpLocalDir = tmpDir
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "old.txt"}}
+	m.sftpCursor[0] = 1
+	m.sftpFocus = 0
+	m.sftpRenaming = true
+	m.sftpRenameInput = "../moved.txt"
+
+	updated, _ := m.sftpConfirmRename()
+	m = updated.(Model)
+
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("original file should remain after invalid rename: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "..", "moved.txt")); err == nil {
+		t.Fatal("invalid rename should not move file outside current directory")
+	}
+	if !strings.Contains(m.statusMsg, "path separators") {
+		t.Fatalf("statusMsg = %q, want path separator error", m.statusMsg)
+	}
+}
+
+func TestSFTPExitDuringTransferCancelsAndLeavesSFTP(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpTransferring = true
+	cancelled := false
+	m.sftpCancel = func() { cancelled = true }
+	m.sftpDone = make(chan sftpTransferResult, 1)
+
+	m = updateModel(m, keyMsg("q"))
+
+	if !cancelled {
+		t.Fatal("exit should cancel the active transfer")
+	}
+	if m.sftpTransferring {
+		t.Fatal("exit should clear transferring state after synchronous cancellation")
+	}
+	if m.sftpDone != nil {
+		t.Fatal("exit should detach the active transfer result channel")
+	}
+	if m.screen != ScreenMain {
+		t.Fatal("exit should return to main screen")
+	}
+}
+
+func TestStaleSFTPTransferResultKeepsTickAlive(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.statusMsg = "visible"
+	m.statusTicks = 1
+	m.sftpTransferID = 2
+	m.sftpTransferring = true
+	m.sftpProgress = sftp.NewProgressInfo("file.txt", 1)
+	m.sftpDone = make(chan sftpTransferResult, 1)
+	m.sftpDone <- sftpTransferResult{id: 1, err: context.Canceled, direction: "download"}
+
+	updated, cmd := m.Update(tickMsg{})
+	m = updated.(Model)
+
+	if !m.sftpTransferring {
+		t.Fatal("stale transfer result should not stop the current transfer")
+	}
+	if m.sftpDone != nil {
+		t.Fatal("stale transfer result should clear old done channel")
+	}
+	if m.statusMsg != "" {
+		t.Fatal("tick should continue processing status countdown after stale result")
+	}
+	if cmd == nil {
+		t.Fatal("tick should continue scheduling the next tick after stale result")
 	}
 }
 

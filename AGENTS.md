@@ -26,9 +26,12 @@ internal/
   ├── monitor/
   │   └── monitor.go           # Stats polling, ping every 5 ticks (1s interval), synchronous updates
   ├── sftp/
-  │   └── client.go            # SFTP wrapper: ReadDir, Upload, Download, DownloadDir, UploadDir, Preview
+  │   └── client.go            # Context-aware SFTP wrapper: read, sync, preview, rename, remote path helpers
   └── tui/
-      └── tui.go               # Bubbletea model, auth prompt queue, all UI rendering, ScreenSFTP dual-panel
+      ├── tui.go               # Bubbletea model, auth prompt queue, main screens, shared styles
+      ├── modal.go             # Reusable full-screen modal overlay
+      ├── sftp_actions.go      # SFTP key handling, context/cancel, transfer orchestration
+      └── sftp_render.go       # SFTP dual-panel rendering, progress, preview
 ```
 
 ## Key Implementation Details
@@ -55,6 +58,9 @@ internal/
 - **Monitor**: synchronous updateTunnelStats() (no goroutine per tunnel)
 - **KnownHosts**: RWMutex on callback access
 - **Auth requests**: channel-based with queue in TUI
+- **SFTP Client**: mu serializes operations and Close(); every file operation accepts a context
+- **SFTP ProgressInfo**: RWMutex protects transfer progress; TUI reads via Snapshot()
+- **SFTP transfers**: started with cancelable context; stale done messages are ignored; exiting SFTP cancels transfer and synchronously closes the client
 
 ### Statistics
 - Interval: 1 second (monitor tick)
@@ -74,6 +80,8 @@ internal/
 - Status badges: background colors (Running=green, Stopped=gray, Error=red, Connecting=yellow)
 - Speed line: left-aligned, 4-space indent, matches IP column above
 - Use `lipgloss.Width()` for ANSI-aware width calculations
+- Modal dialogs use `ModalSpec` and a full-screen mask that only renders the centered modal rectangle
+- SFTP has no separate tab row; focus is shown by a highlighted Local/Remote panel title badge
 
 ### SOCKS5 (Dynamic forward)
 - Supports no-auth only (method 0x00)
@@ -83,10 +91,13 @@ internal/
 ### SFTP File Manager
 - Entry: press `f` on Running tunnel, reuses SSH connection via SFTPCapable interface
 - Dual-panel: left=Local, right=Remote, Tab switches focus
-- Operations: Upload(u), Download(d), Recursive sync(r), Preview(v)
-- Transfer runs in goroutine, progress shown in bottom status bar
-- SFTPClient.mu serializes all sftp operations
-- Tunnel disconnect auto-closes SFTP screen
+- Navigation: arrows and PgUp/PgDn scroll long lists; Enter opens directory or parent
+- Operations: Sync selected file (`s`), recursive directory sync (`r` with confirm modal), rename (`n`), preview (`v`)
+- Sync direction follows the active panel: Local uploads to Remote, Remote downloads to Local
+- Rename accepts basename-only names and rejects path separators, `.` and `..`
+- Preview reads the first 4KB of a file
+- Transfer progress is shown in a drawer; status, confirm, and error notices use the shared modal component
+- Exiting SFTP with `q`/Esc cancels active transfer and synchronously closes the SFTP client
 
 ### Cross-platform
 - Username lookup: os/user.Current() with USER/LOGNAME fallback
@@ -100,7 +111,7 @@ internal/
 - Version: `git describe --tags` injected via `-ldflags "-X main.Version=$(VERSION)"`
 
 ## Testing
-- 58 tests across config, monitor, tui, tunnel packages
+- Tests cover config, monitor, sftp, tui, and tunnel packages
 - Mock infrastructure in platform/mock.go
 - `make test` / `make vet`
 
@@ -112,12 +123,19 @@ internal/
 - [ ] Connection lost shows SSH_CONNECTION_LOST message
 - [ ] Reconnect (r) works after connection failure
 - [ ] Remote tunnel accepts ip:port format for both local target and remote listen
+- [ ] SFTP long file lists scroll with arrows and PgUp/PgDn
+- [ ] SFTP sync, recursive sync, rename, and preview work from both panels
+- [ ] SFTP rename rejects path separators and parent/current directory names
+- [ ] SFTP exit during transfer cancels the operation and returns to the main screen
+- [ ] Global modal overlays show only the centered dialog on a full-screen mask
 
 ## Known Limitations
 - SOCKS5 dynamic proxy: no-auth only, no IPv6 address type
 - Single auth request at a time (queue-based)
 - Host key format in known_hosts must be "host:port" for proper matching
 - Remote tunnel listen requires GatewayPorts yes on server for non-localhost
+- SFTP preview is intentionally capped at the first 4KB
+- SFTP exit may block briefly while cancel/close completes
 
 ## Debugging
 - Set `INTUN_LOG` env var to a file path for SSH connection diagnostics

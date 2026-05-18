@@ -18,6 +18,7 @@ Interactive SSH Tunnel - A cross-platform SSH tunnel manager with a rich TUI int
 - **Password Authentication**: Interactive password and keyboard-interactive auth via TUI prompts
 - **Connection Health**: SSH/TCP keepalive with automatic reconnection prompts on connection loss
 - **Remote Tunnel LAN Targets**: Supports `ip:port` format for both local target and remote listen address
+- **Integrated SFTP Manager**: Dual-panel local/remote browser with file sync, directory sync, rename, and preview
 - **Keyboard-driven Interface**: Efficient navigation and control via shortcuts
 
 ## Installation
@@ -63,20 +64,37 @@ Launch intun:
 
 ### Keyboard Shortcuts
 
+Main screen:
+
 | Key | Action |
 |-----|--------|
 | `c` | Create new tunnel |
 | `r` | Reconnect failed tunnel |
 | `s` | Stop/Start selected tunnel |
 | `d` | Delete selected tunnel |
+| `f` | Open SFTP file manager for a running tunnel |
 | `↑↓` | Navigate tunnel list |
 | `e` | Exit |
+
+SFTP screen:
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Switch local/remote panel |
+| `↑↓` / `PgUp` / `PgDn` | Navigate and scroll files |
+| `Enter` | Open directory or parent |
+| `s` | Sync selected file in the active panel's direction |
+| `r` | Recursively sync selected directory after confirmation |
+| `n` | Rename selected item |
+| `v` | Preview selected file |
+| `q` / `Esc` | Close preview or exit SFTP |
 
 ### Requirements
 
 - Go 1.21+ (for building)
 - SSH key in `~/.ssh/` (id_rsa, id_ed25519, or id_ecdsa) or password auth
 - SSH config file at `~/.ssh/config` (optional, for host discovery)
+- SSH server with SFTP subsystem enabled (only required for the SFTP manager)
 
 ## Configuration
 
@@ -103,8 +121,10 @@ Supported fields:
 
 - **UI Framework**: [bubbletea](https://github.com/charmbracelet/bubbletea) (Charm TUI)
 - **SSH Library**: [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh)
+- **SFTP Library**: [github.com/pkg/sftp](https://github.com/pkg/sftp)
 - **Styling**: [lipgloss](https://github.com/charmbracelet/lipgloss)
 - **Statistics**: 1s interval sampling, 5s interval ping, TX/RX totals with ↑↓ speed indicators
+- **TUI Safety**: Shared modal overlays, cancelable SFTP operations, and serialized SFTP client access
 
 ## Development
 

@@ -6,11 +6,9 @@ import (
 	"image/color"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -78,7 +76,7 @@ var (
 			Foreground(colorDanger)
 
 	borderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(uiBorder()).
 			BorderForeground(colorMuted).
 			Padding(0, 1)
 
@@ -161,7 +159,7 @@ var (
 			Bold(true)
 
 	statCardStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(uiBorder()).
 			BorderForeground(colorMuted).
 			Padding(0, 2).
 			MarginRight(1).
@@ -373,15 +371,24 @@ type Model struct {
 	sftpPreview        string
 	sftpPreviewing     bool
 	sftpCancel         context.CancelFunc
+	sftpTransferID     int
 	sftpTunnelID       int
 	sftpHostLabel      string
-	sftpDone           chan struct{}
+	sftpDone           chan sftpTransferResult
 	sftpDirection      string
 	sftpPrevDone       int64
 	sftpRenaming       bool
 	sftpRenameInput    string
 	sftpSyncConfirm    bool
 	sftpSyncConfirmMsg string
+}
+
+type sftpTransferResult struct {
+	id        int
+	err       error
+	source    string
+	target    string
+	direction string
 }
 
 func (m *Model) setStatusMsg(msg string) {
@@ -486,11 +493,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.screen == ScreenSFTP {
+			m = m.normalizeSFTPScroll()
+		}
 		return m, nil
 	case sizeMsg:
 		if msg.width != m.width || msg.height != m.height {
 			m.width = msg.width
 			m.height = msg.height
+			if m.screen == ScreenSFTP {
+				m = m.normalizeSFTPScroll()
+			}
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -503,20 +516,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = ""
 			}
 		}
-		if m.screen == ScreenSFTP && m.sftpDone != nil {
+		if m.sftpDone != nil {
 			if m.sftpTransferring && m.sftpProgress != nil {
-				doneNow := atomic.LoadInt64(&m.sftpProgress.Done)
-				m.sftpProgress.Speed = (doneNow - m.sftpPrevDone) * 2
-				m.sftpPrevDone = doneNow
+				snapshot := m.sftpProgress.Snapshot()
+				m.sftpProgress.SetSpeed((snapshot.Done - m.sftpPrevDone) * 2)
+				m.sftpPrevDone = snapshot.Done
 			}
 			select {
-			case <-m.sftpDone:
-				m.sftpTransferring = false
-				if m.sftpProgress != nil {
-					m.sftpProgress.Active = false
+			case result := <-m.sftpDone:
+				if result.id != m.sftpTransferID {
+					m.sftpDone = nil
+				} else {
+					m.sftpTransferring = false
+					m.sftpCancel = nil
+					if m.sftpProgress != nil {
+						m.sftpProgress.SetActive(false)
+					}
+					if m.screen == ScreenSFTP {
+						if result.err != nil {
+							m.setStatusMsg(formatSFTPTransferError(result))
+						} else {
+							m.setStatusMsg(formatSFTPTransferSuccess(result))
+						}
+					}
+					if result.err == nil && m.screen == ScreenSFTP && m.sftpClient != nil {
+						var refreshErr error
+						m, refreshErr = m.refreshSFTPFiles()
+						if refreshErr != nil {
+							m.setStatusMsg(fmt.Sprintf("Transfer finished, but refresh failed: %v", refreshErr))
+						}
+					}
+					m.sftpDone = nil
 				}
-				m = m.refreshSFTPFiles()
-				m.sftpDone = nil
 			default:
 			}
 		}
@@ -694,7 +725,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.sftpClient = nil
 					return m, nil
 				}
-				remoteFiles, rerr := m.sftpClient.ReadRemoteDir(m.sftpRemoteDir)
+				remoteFiles, rerr := m.sftpClient.ReadRemoteDir(m.sftpContext(), m.sftpRemoteDir)
 				if rerr != nil {
 					m.err = rerr
 					m.sftpClient = nil
@@ -705,6 +736,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.sftpFocus = 0
 				m.sftpCursor = [2]int{0, 0}
 				m.sftpScroll = [2]int{0, 0}
+				m = m.normalizeSFTPScroll()
 				m.sftpTransferring = false
 				m.sftpPreview = ""
 				m.sftpPreviewing = false
@@ -767,6 +799,16 @@ func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.hostCursor < len(m.hosts)-1 {
 			m.hostCursor++
 		}
+	case "pgup":
+		m.hostCursor -= hostSelectVisibleItems(m.height)
+		if m.hostCursor < 0 {
+			m.hostCursor = 0
+		}
+	case "pgdown":
+		m.hostCursor += hostSelectVisibleItems(m.height)
+		if m.hostCursor >= len(m.hosts) {
+			m.hostCursor = len(m.hosts) - 1
+		}
 	case "home":
 		m.hostCursor = 0
 	case "end":
@@ -774,7 +816,7 @@ func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.hostCursor = len(m.hosts) - 1
 		}
 	}
-	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, selectListHeight(m.height, hostListHeight))
+	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, hostSelectVisibleItems(m.height))
 	return m, nil
 }
 
@@ -805,8 +847,18 @@ func (m Model) handleTypeSelectKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.typeCursor < len(items)-1 {
 			m.typeCursor++
 		}
+	case "pgup":
+		m.typeCursor -= selectListVisibleItems(m.height, typeListHeight)
+		if m.typeCursor < 0 {
+			m.typeCursor = 0
+		}
+	case "pgdown":
+		m.typeCursor += selectListVisibleItems(m.height, typeListHeight)
+		if m.typeCursor >= len(items) {
+			m.typeCursor = len(items) - 1
+		}
 	}
-	m.typeScroll = clampScroll(m.typeCursor, m.typeScroll, selectListHeight(m.height, typeListHeight))
+	m.typeScroll = clampScroll(m.typeCursor, m.typeScroll, selectListVisibleItems(m.height, typeListHeight))
 	return m, nil
 }
 
@@ -962,33 +1014,8 @@ func (m Model) renderView() string {
 	}
 
 	content += m.renderShortcuts()
-	if overlay := m.renderStatusOverlay(width, height); overlay != "" {
-		contentLines := strings.Split(content, "\n")
-		overlayLines := strings.Split(overlay, "\n")
-		maxLines := len(contentLines)
-		if len(overlayLines) > maxLines {
-			maxLines = len(overlayLines)
-		}
-		var sb strings.Builder
-		for i := 0; i < maxLines; i++ {
-			useOverlay := i < len(overlayLines) && strings.Contains(overlayLines[i], "\x1b[")
-			if useOverlay {
-				sb.WriteString(overlayLines[i])
-			} else if i < len(contentLines) {
-				line := contentLines[i]
-				lineW := lipgloss.Width(line)
-				if lineW < width {
-					line += strings.Repeat(" ", width-lineW)
-				}
-				sb.WriteString(line)
-			} else {
-				sb.WriteString(strings.Repeat(" ", width))
-			}
-			if i < maxLines-1 {
-				sb.WriteString("\n")
-			}
-		}
-		content = sb.String()
+	if overlay := m.renderStatusOverlay(width); overlay.content != "" {
+		content = overlayCentered(content, overlay, width, height)
 	}
 
 	if m.promptMode {
@@ -1111,18 +1138,23 @@ func tunnelTypeItems() []typeItem {
 
 func (m Model) renderHostSelect() string {
 	width := renderWidth(m.width)
-	height := selectListHeight(m.height, hostListHeight)
-	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, height)
+	visibleItems := hostSelectVisibleItems(m.height)
+	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, visibleItems)
 
 	var b strings.Builder
-	b.WriteString(sectionTitleStyle.Render("Select Host"))
+	title := "Select Host"
+	if len(m.hosts) > 0 {
+		end := min(len(m.hosts), m.hostScroll+visibleItems)
+		title = fmt.Sprintf("Select Host  %d-%d/%d", m.hostScroll+1, end, len(m.hosts))
+	}
+	b.WriteString(sectionTitleStyle.Render(title))
 	b.WriteString("\n")
 	if len(m.hosts) == 0 {
 		b.WriteString(panelStyle(width-2, 5, false).Render(mutedStyle.Render("No hosts found in ~/.ssh/config")))
 		b.WriteString("\n")
 		return b.String()
 	}
-	end := min(len(m.hosts), m.hostScroll+height)
+	end := min(len(m.hosts), m.hostScroll+visibleItems)
 	for i := m.hostScroll; i < end; i++ {
 		h := m.hosts[i]
 		name := h.Hostname
@@ -1152,10 +1184,14 @@ func (m Model) renderHostSelect() string {
 func (m Model) renderTypeSelect() string {
 	width := renderWidth(m.width)
 	items := tunnelTypeItems()
+	visibleItems := selectListVisibleItems(m.height, typeListHeight)
+	m.typeScroll = clampScroll(m.typeCursor, m.typeScroll, visibleItems)
 	var b strings.Builder
 	b.WriteString(sectionTitleStyle.Render("Select Tunnel Type"))
 	b.WriteString("\n")
-	for i, item := range items {
+	end := min(len(items), m.typeScroll+visibleItems)
+	for i := m.typeScroll; i < end; i++ {
+		item := items[i]
 		row := item.name + "\n" + mutedStyle.Render(item.desc)
 		if i == m.typeCursor {
 			b.WriteString(listSelectedStyle.Width(width - 2).Render(row))
@@ -1173,45 +1209,47 @@ func (m Model) renderPromptModal(width int) ModalView {
 		return ModalView{}
 	}
 
-	modalWidth := min(64, width-8)
-	if modalWidth < 40 {
-		modalWidth = width - 4
-	}
-	contentWidth := modalWidth - 6
-
-	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().
-		Background(colorDanger).
-		Foreground(colorSelected).
-		Bold(true).
-		Padding(0, 1).
-		Render("Auth Required"))
-	b.WriteString("\n")
-
 	if current.Type == platform.AuthRequestHostKey {
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Unknown host key"))
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("Host        %s\n", selectedStyle.Render(truncate(current.Host, contentWidth-12))))
-		b.WriteString(fmt.Sprintf("Fingerprint %s\n", truncate(current.Fingerprint, contentWidth-12)))
-		b.WriteString("\n")
-		b.WriteString(shortcutStyle.Render("[A] Accept    [R] Reject"))
-	} else {
-		attempt := current.RetryCount + 1
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render(fmt.Sprintf("Password required  attempt %d/3", attempt)))
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("Host %s\n", selectedStyle.Render(truncate(current.Host, contentWidth-6))))
-		mask := strings.Repeat("*", len([]rune(m.promptInput)))
-		b.WriteString(fmt.Sprintf("[%s]\n\n", truncate(mask, contentWidth-2)))
-		b.WriteString(shortcutStyle.Render("[Enter] Submit    [Esc] Cancel"))
-	}
-	if pending := m.authQueue.PendingCount(); pending > 0 {
-		b.WriteString("\n")
-		b.WriteString(shortcutStyle.Render(fmt.Sprintf("%d more auth request(s) queued", pending)))
+		body := []string{"Unknown host key"}
+		if pending := m.authQueue.PendingCount(); pending > 0 {
+			body = append(body, fmt.Sprintf("%d more auth request(s) queued", pending))
+		}
+		return renderModalSpec(width, ModalSpec{
+			Title:    "Auth Required",
+			Severity: ModalDanger,
+			Body:     body,
+			Fields: []ModalField{
+				{Label: "Host", Value: current.Host},
+				{Label: "Fingerprint", Value: current.Fingerprint},
+			},
+			Actions: []ModalAction{
+				{Key: "A", Label: "Accept"},
+				{Key: "R", Label: "Reject"},
+			},
+			Width: min(64, width-8),
+		})
 	}
 
-	return renderModal(width, b.String(), modalWidth)
+	attempt := current.RetryCount + 1
+	mask := strings.Repeat("*", len([]rune(m.promptInput)))
+	body := []string{fmt.Sprintf("Password required  attempt %d/3", attempt)}
+	if pending := m.authQueue.PendingCount(); pending > 0 {
+		body = append(body, fmt.Sprintf("%d more auth request(s) queued", pending))
+	}
+	return renderModalSpec(width, ModalSpec{
+		Title:    "Auth Required",
+		Severity: ModalDanger,
+		Body:     body,
+		Fields: []ModalField{
+			{Label: "Host", Value: current.Host},
+			{Label: "Password", Value: "[" + mask + "]"},
+		},
+		Actions: []ModalAction{
+			{Key: "Enter", Label: "Submit"},
+			{Key: "Esc", Label: "Cancel"},
+		},
+		Width: min(64, width-8),
+	})
 }
 
 func (m Model) renderQuitConfirmModal(width int) ModalView {
@@ -1223,129 +1261,44 @@ func (m Model) renderQuitConfirmModal(width int) ModalView {
 		}
 	}
 
-	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().
-		Background(colorWarning).
-		Foreground(colorPanel).
-		Bold(true).
-		Padding(0, 1).
-		Render("Confirm Exit"))
-	b.WriteString("\n\n")
-	b.WriteString(headerStyle.Render("Active tunnels are still running"))
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("%d live tunnel(s) will be closed when inTun exits.\n", liveCount))
-	b.WriteString("\n")
-	b.WriteString(shortcutStyle.Render("[Enter/Y/Q] Exit    [Esc/N] Cancel"))
-
-	return renderModal(width, b.String(), 56)
+	return renderModalSpec(width, ModalSpec{
+		Title:    "Confirm Exit",
+		Severity: ModalWarning,
+		Body: []string{
+			"Active tunnels are still running",
+			fmt.Sprintf("%d live tunnel(s) will be closed when inTun exits.", liveCount),
+		},
+		Actions: []ModalAction{
+			{Key: "Enter/Y/Q", Label: "Exit"},
+			{Key: "Esc/N", Label: "Cancel"},
+		},
+		Width: 56,
+	})
 }
 
-func (m Model) renderStatusOverlay(width, height int) string {
+func (m Model) renderStatusOverlay(width int) ModalView {
 	if m.sftpSyncConfirm {
-		return renderDialogBox(width, height, m.sftpSyncConfirmMsg, true)
+		body, fields := modalMessageParts(m.sftpSyncConfirmMsg)
+		return renderModalSpec(width, ModalSpec{
+			Title:    "Confirm Sync",
+			Severity: ModalWarning,
+			Body:     body,
+			Fields:   fields,
+			Actions: []ModalAction{
+				{Key: "Enter", Label: "Confirm"},
+				{Key: "Esc", Label: "Cancel"},
+			},
+		})
 	}
 	if m.statusMsg == "" {
-		return ""
+		return ModalView{}
 	}
-	msg := m.statusMsg
-	return renderDialogBox(width, height, msg, false)
-}
-
-func renderDialogBox(width, height int, msg string, hasButtons bool) string {
-	boxBg := "\x1b[48;5;236m"
-	textFg := "\x1b[38;5;252m"
-	labelFg := "\x1b[38;2;166;227;161m\x1b[1m"
-	btnBg := "\x1b[48;5;75m\x1b[38;5;235m\x1b[1m"
-	dimFg := "\x1b[38;5;102m"
-	bold := "\x1b[1m"
-	reset := "\x1b[0m"
-
-	type dl struct {
-		plainW int
-		ansi   string
-	}
-
-	padX := 3
-	padY := 1
-	var lines []dl
-
-	for i := 0; i < padY; i++ {
-		lines = append(lines, dl{})
-	}
-	for _, ml := range strings.Split(msg, "\n") {
-		trimmed := strings.TrimLeft(ml, " ")
-		if strings.HasPrefix(trimmed, "FROM:") || strings.HasPrefix(trimmed, "TO:") {
-			parts := strings.SplitN(trimmed, ": ", 2)
-			lead := len(ml) - len(trimmed)
-			label := parts[0] + ":"
-			value := ""
-			if len(parts) == 2 {
-				value = parts[1]
-			}
-			pw := lead + len(label) + 1 + len(value)
-			a := boxBg + strings.Repeat(" ", lead) + labelFg + label + reset + boxBg + " " + textFg + value + reset + boxBg
-			lines = append(lines, dl{pw, a})
-		} else {
-			lines = append(lines, dl{len(ml), boxBg + textFg + bold + ml + reset + boxBg})
-		}
-	}
-	if hasButtons {
-		lines = append(lines, dl{})
-		cp := "Enter Confirm"
-		ep := "  Esc Cancel"
-		pw := 1 + len(cp) + 1 + len(ep)
-		a := btnBg + " " + cp + " " + reset + boxBg + dimFg + ep + reset + boxBg
-		lines = append(lines, dl{pw, a})
-	}
-	for i := 0; i < padY; i++ {
-		lines = append(lines, dl{})
-	}
-
-	innerW := 0
-	for _, l := range lines {
-		if w := l.plainW + padX*2; w > innerW {
-			innerW = w
-		}
-	}
-
-	styledLines := make([]string, len(lines))
-	for i, l := range lines {
-		if l.plainW == 0 {
-			styledLines[i] = boxBg + strings.Repeat(" ", innerW) + reset
-		} else {
-			padR := innerW - padX - l.plainW
-			if padR < padX {
-				padR = padX
-			}
-			styledLines[i] = boxBg + strings.Repeat(" ", padX) + l.ansi + strings.Repeat(" ", padR) + reset
-		}
-	}
-
-	boxW := lipgloss.Width(styledLines[0])
-	boxH := len(styledLines)
-	row := height/2 - boxH/2
-	col := (width - boxW) / 2
-
-	var b strings.Builder
-	for y := 0; y < height; y++ {
-		if y == row {
-			for bi, sl := range styledLines {
-				if col > 0 {
-					b.WriteString(strings.Repeat(" ", col))
-				}
-				b.WriteString(sl)
-				if bi < len(styledLines)-1 {
-					b.WriteString("\n")
-				}
-			}
-			y += boxH - 1
-			continue
-		}
-		if y < height-1 {
-			b.WriteString("\n")
-		}
-	}
-	return b.String()
+	body, fields := modalMessageParts(m.statusMsg)
+	return renderModalSpec(width, ModalSpec{
+		Title:  "Notice",
+		Body:   body,
+		Fields: fields,
+	})
 }
 
 func (m Model) renderShortcuts() string {
@@ -1502,85 +1455,14 @@ func renderHeight(height int) int {
 	return height
 }
 
-type ModalView struct {
-	content string
-	width   int
-}
-
-func (m ModalView) String() string {
-	return m.content
-}
-
-func overlayCentered(base string, modal ModalView, width, height int) string {
-	if modal.content == "" {
-		return base
-	}
-
-	lines := strings.Split(base, "\n")
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-
-	modalLines := strings.Split(modal.content, "\n")
-	top := (height - len(modalLines)) / 2
-	if top < 0 {
-		top = 0
-	}
-	left := (width - modal.width) / 2
-	if left < 0 {
-		left = 0
-	}
-	prefix := strings.Repeat(" ", left)
-
-	for i, modalLine := range modalLines {
-		row := top + i
-		if row >= len(lines) {
-			break
-		}
-		lines[row] = prefix + modalLine
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func renderModal(screenWidth int, body string, modalWidth int) ModalView {
-	if modalWidth <= 0 {
-		modalWidth = min(64, screenWidth-8)
-	}
-	maxWidth := screenWidth - 4
-	if modalWidth > maxWidth {
-		modalWidth = maxWidth
-	}
-	if modalWidth < 40 {
-		modalWidth = screenWidth - 4
-	}
-
-	contentWidth := modalWidth - 4
-	border := lipgloss.NewStyle().Foreground(colorWarning)
-	lines := []string{
-		border.Render("╭" + strings.Repeat("─", modalWidth-2) + "╮"),
-		border.Render("│") + " " + strings.Repeat(" ", contentWidth) + " " + border.Render("│"),
-	}
-	for _, line := range strings.Split(body, "\n") {
-		lines = append(lines, border.Render("│")+" "+fitLine(line, contentWidth)+" "+border.Render("│"))
-	}
-	lines = append(lines,
-		border.Render("│")+" "+strings.Repeat(" ", contentWidth)+" "+border.Render("│"),
-		border.Render("╰"+strings.Repeat("─", modalWidth-2)+"╯"),
-	)
-	return ModalView{
-		content: strings.Join(lines, "\n"),
-		width:   modalWidth,
-	}
+func uiBorder() lipgloss.Border {
+	return lipgloss.RoundedBorder()
 }
 
 func panelStyle(width, height int, focused bool) lipgloss.Style {
 	style := lipgloss.NewStyle().
 		Width(width).
-		Border(lipgloss.RoundedBorder()).
+		Border(uiBorder()).
 		BorderForeground(colorSurface).
 		Padding(0, 1)
 	if height > 0 {
@@ -1634,7 +1516,7 @@ func (m Model) renderTunnelSummary(width int, total int) string {
 	}
 	return lipgloss.NewStyle().
 		Width(width).
-		Border(lipgloss.NormalBorder(), false, false, true, false).
+		Border(uiBorder(), false, false, true, false).
 		BorderForeground(colorMuted).
 		PaddingBottom(1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Center, cards...))
@@ -1642,7 +1524,7 @@ func (m Model) renderTunnelSummary(width int, total int) string {
 
 func metricPill(label, value string, valueStyle lipgloss.Style) string {
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(uiBorder()).
 		BorderForeground(colorMuted).
 		Padding(0, 1).
 		MarginRight(1).
@@ -1712,7 +1594,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	}
 	rowStyle := lipgloss.NewStyle().
 		Width(width).
-		Border(lipgloss.RoundedBorder()).
+		Border(uiBorder()).
 		BorderForeground(borderColor).
 		Padding(0, 1).
 		MarginBottom(1)
@@ -1831,16 +1713,6 @@ func renderTunnelErrorHint(t *tunnel.Tunnel, width int) []string {
 	}
 }
 
-func centerLine(line string, width int) string {
-	lineWidth := lipgloss.Width(line)
-	if lineWidth >= width {
-		return line
-	}
-	left := (width - lineWidth) / 2
-	right := width - lineWidth - left
-	return strings.Repeat(" ", left) + line + strings.Repeat(" ", right)
-}
-
 func fitLine(line string, width int) string {
 	if lipgloss.Width(line) > width {
 		line = truncateANSI(line, width)
@@ -1914,6 +1786,22 @@ func selectListHeight(height, maxHeight int) int {
 		listHeight = 5
 	}
 	return listHeight
+}
+
+func hostSelectVisibleItems(height int) int {
+	return selectListVisibleItems(height, hostListHeight)
+}
+
+func selectListVisibleItems(height, maxItems int) int {
+	rowHeight := 3
+	items := selectListHeight(height, maxItems*rowHeight) / rowHeight
+	if items < 1 {
+		return 1
+	}
+	if items > maxItems {
+		return maxItems
+	}
+	return items
 }
 
 func clampScroll(cursor, scroll, height int) int {
@@ -1998,722 +1886,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.sftpRenaming {
-		switch msg.String() {
-		case "enter":
-			return m.sftpConfirmRename()
-		case "esc":
-			m.sftpRenaming = false
-			m.sftpRenameInput = ""
-		case "backspace":
-			if len(m.sftpRenameInput) > 0 {
-				m.sftpRenameInput = m.sftpRenameInput[:len(m.sftpRenameInput)-1]
-			}
-		default:
-			if len(msg.String()) == 1 && msg.String()[0] >= 32 {
-				m.sftpRenameInput += msg.String()
-			}
-		}
-		return m, nil
-	}
-
-	if m.sftpSyncConfirm {
-		switch msg.String() {
-		case "enter":
-			m.sftpSyncConfirm = false
-			m.sftpSyncConfirmMsg = ""
-			return m.sftpDoRecursive()
-		case "esc":
-			m.sftpSyncConfirm = false
-			m.sftpSyncConfirmMsg = ""
-		}
-		return m, nil
-	}
-
-	if m.sftpPreviewing {
-		switch msg.String() {
-		case "esc", "q":
-			m.sftpPreviewing = false
-			m.sftpPreview = ""
-		}
-		return m, nil
-	}
-
-	switch msg.String() {
-	case "q", "esc":
-		if m.sftpCancel != nil {
-			m.sftpCancel()
-			m.sftpCancel = nil
-		}
-		if m.sftpClient != nil {
-			m.sftpClient.Close()
-			m.sftpClient = nil
-		}
-		m.screen = ScreenMain
-		return m, nil
-	case "tab":
-		if m.sftpFocus == 0 {
-			m.sftpFocus = 1
-		} else {
-			m.sftpFocus = 0
-		}
-	case "up", "k":
-		if m.sftpCursor[m.sftpFocus] > 0 {
-			m.sftpCursor[m.sftpFocus]--
-		}
-	case "down", "j":
-		files := m.currentSFTPFiles()
-		if m.sftpCursor[m.sftpFocus] < len(files) {
-			m.sftpCursor[m.sftpFocus]++
-		}
-	case "pgup":
-		visibleHeight := m.sftpVisibleHeight()
-		cur := &m.sftpCursor[m.sftpFocus]
-		*cur -= visibleHeight
-		if *cur < 0 {
-			*cur = 0
-		}
-	case "pgdown":
-		files := m.currentSFTPFiles()
-		visibleHeight := m.sftpVisibleHeight()
-		maxCur := len(files)
-		cur := &m.sftpCursor[m.sftpFocus]
-		*cur += visibleHeight
-		if *cur > maxCur {
-			*cur = maxCur
-		}
-	case "enter":
-		return m.sftpEnterDir()
-	case "s":
-		if m.sftpTransferring {
-			m.setStatusMsg("Wait for transfer to complete")
-			return m, nil
-		}
-		return m.sftpStartSync()
-	case "r":
-		if m.sftpTransferring {
-			m.setStatusMsg("Wait for transfer to complete")
-			return m, nil
-		}
-		return m.sftpStartRecursiveConfirm()
-	case "v":
-		if m.sftpTransferring {
-			m.setStatusMsg("Wait for transfer to complete")
-			return m, nil
-		}
-		return m.sftpPreviewFile()
-	case "n":
-		if !m.sftpTransferring {
-			files := m.currentSFTPFiles()
-			cursor := m.sftpCursor[m.sftpFocus]
-			if cursor == 0 || cursor > len(files) {
-				m.setStatusMsg("No file selected")
-				return m, nil
-			}
-			m.sftpRenaming = true
-			m.sftpRenameInput = files[cursor-1].Name
-		} else {
-			m.setStatusMsg("Wait for transfer to complete")
-		}
-	}
-	return m, nil
-}
-
-func (m Model) currentSFTPFiles() []sftp.FileEntry {
-	if m.sftpFocus == 0 {
-		return m.sftpLocalFiles
-	}
-	return m.sftpRemoteFiles
-}
-
-func (m Model) sftpVisibleHeight() int {
-	h := m.height - sftpChromeHeight()
-	h -= m.sftpDrawerHeight()
-	if h < 5 {
-		h = 5
-	}
-	return h
-}
-
-func sftpChromeHeight() int {
-	return 13
-}
-
-func (m Model) sftpDrawerHeight() int {
-	height := 0
-	if m.sftpRenaming {
-		height += 3
-	}
-	if m.sftpTransferring {
-		height += 4
-	}
-	if m.sftpPreviewing {
-		height += m.sftpPreviewHeight() + 3
-	}
-	return height
-}
-
-func (m Model) sftpPreviewHeight() int {
-	height := m.height / 4
-	if height < 4 {
-		height = 4
-	}
-	if height > 8 {
-		height = 8
-	}
-	return height
-}
-
-func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
-	files := m.currentSFTPFiles()
-	cursor := m.sftpCursor[m.sftpFocus]
-	var target string
-
-	if cursor == 0 {
-		if m.sftpFocus == 0 {
-			target = filepath.Dir(m.sftpLocalDir)
-		} else {
-			target = filepath.Dir(m.sftpRemoteDir)
-		}
-	} else {
-		idx := cursor - 1
-		if idx >= len(files) || !files[idx].IsDir {
-			m.setStatusMsg("Use [v] to preview, [s] to sync")
-			return m, nil
-		}
-		if m.sftpFocus == 0 {
-			target = filepath.Join(m.sftpLocalDir, files[idx].Name)
-		} else {
-			if m.sftpRemoteDir == "/" {
-				target = "/" + files[idx].Name
-			} else {
-				target = m.sftpRemoteDir + "/" + files[idx].Name
-			}
-		}
-	}
-
-	return m.sftpNavigateTo(target)
-}
-
-func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
-	if m.sftpFocus == 0 {
-		localFiles, err := sftp.ReadLocalDir(path)
-		if err != nil {
-			m.setStatusMsg("Cannot open directory")
-			return m, nil
-		}
-		m.sftpLocalDir = path
-		m.sftpLocalFiles = localFiles
-	} else {
-		remoteFiles, err := m.sftpClient.ReadRemoteDir(path)
-		if err != nil {
-			m.setStatusMsg("Cannot open directory")
-			return m, nil
-		}
-		m.sftpRemoteDir = path
-		m.sftpRemoteFiles = remoteFiles
-	}
-	m.sftpCursor[m.sftpFocus] = 0
-	m.sftpScroll[m.sftpFocus] = 0
-	return m, nil
-}
-
-func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
-	if m.sftpFocus == 0 {
-		files := m.sftpLocalFiles
-		cursor := m.sftpCursor[0]
-		if cursor == 0 || cursor > len(files) {
-			m.setStatusMsg("No file selected")
-			return m, nil
-		}
-		entry := files[cursor-1]
-		if entry.IsDir {
-			m.setStatusMsg("Use [r] for directory sync")
-			return m, nil
-		}
-		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-		remotePath := m.sftpRemoteDir + "/" + entry.Name
-		m.sftpTransferring = true
-		m.sftpDirection = "↑"
-		m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
-		m.sftpPrevDone = 0
-		done := make(chan struct{})
-		m.sftpDone = done
-		client := m.sftpClient
-		go func() {
-			client.Upload(localPath, remotePath, func(n int64) {
-				atomic.StoreInt64(&m.sftpProgress.Done, n)
-			})
-			close(done)
-		}()
-		return m, nil
-	}
-
-	files := m.sftpRemoteFiles
-	cursor := m.sftpCursor[1]
-	if cursor == 0 || cursor > len(files) {
-		m.setStatusMsg("No file selected")
-		return m, nil
-	}
-	entry := files[cursor-1]
-	if entry.IsDir {
-		m.setStatusMsg("Use [r] for directory sync")
-		return m, nil
-	}
-	remotePath := m.sftpRemoteDir + "/" + entry.Name
-	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-	m.sftpTransferring = true
-	m.sftpDirection = "↓"
-	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Total: entry.Size, Active: true}
-	m.sftpPrevDone = 0
-	done := make(chan struct{})
-	m.sftpDone = done
-	client := m.sftpClient
-	go func() {
-		client.Download(remotePath, localPath, func(n int64) {
-			atomic.StoreInt64(&m.sftpProgress.Done, n)
-		})
-		close(done)
-	}()
-	return m, nil
-}
-
-func (m Model) sftpStartRecursiveConfirm() (tea.Model, tea.Cmd) {
-	files := m.currentSFTPFiles()
-	cursor := m.sftpCursor[m.sftpFocus]
-	if cursor == 0 || cursor > len(files) {
-		m.setStatusMsg("No file selected")
-		return m, nil
-	}
-	entry := files[cursor-1]
-	if !entry.IsDir {
-		m.setStatusMsg("Use [s] for file sync")
-		return m, nil
-	}
-
-	var src, dst string
-	if m.sftpFocus == 0 {
-		src = filepath.Join(m.sftpLocalDir, entry.Name)
-		dst = m.sftpRemoteDir + "/" + entry.Name
-	} else {
-		src = m.sftpRemoteDir + "/" + entry.Name
-		dst = filepath.Join(m.sftpLocalDir, entry.Name)
-	}
-
-	m.sftpSyncConfirm = true
-	m.sftpSyncConfirmMsg = fmt.Sprintf("FROM: %s\n  TO: %s", src, dst)
-	return m, nil
-}
-
-func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
-	if m.sftpFocus == 0 {
-		files := m.sftpLocalFiles
-		cursor := m.sftpCursor[0]
-		if cursor == 0 || cursor > len(files) {
-			return m, nil
-		}
-		entry := files[cursor-1]
-		if !entry.IsDir {
-			return m, nil
-		}
-		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-		remotePath := m.sftpRemoteDir + "/" + entry.Name
-		m.sftpTransferring = true
-		m.sftpDirection = "⇡"
-		m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
-		m.sftpPrevDone = 0
-		done := make(chan struct{})
-		m.sftpDone = done
-		client := m.sftpClient
-		go func() {
-			client.UploadDir(localPath, remotePath, func(done, total int64, file string) {
-				atomic.StoreInt64(&m.sftpProgress.Done, done)
-				atomic.StoreInt64(&m.sftpProgress.Total, total)
-				m.sftpProgress.File = file
-			})
-			close(done)
-		}()
-		return m, nil
-	}
-
-	files := m.sftpRemoteFiles
-	cursor := m.sftpCursor[1]
-	if cursor == 0 || cursor > len(files) {
-		return m, nil
-	}
-	entry := files[cursor-1]
-	if !entry.IsDir {
-		return m, nil
-	}
-	remotePath := m.sftpRemoteDir + "/" + entry.Name
-	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-	m.sftpTransferring = true
-	m.sftpDirection = "⇣"
-	m.sftpProgress = &sftp.ProgressInfo{File: entry.Name, Active: true}
-	m.sftpPrevDone = 0
-	done := make(chan struct{})
-	m.sftpDone = done
-	client := m.sftpClient
-	go func() {
-		client.DownloadDir(remotePath, localPath, func(done, total int64, file string) {
-			atomic.StoreInt64(&m.sftpProgress.Done, done)
-			atomic.StoreInt64(&m.sftpProgress.Total, total)
-			m.sftpProgress.File = file
-		})
-		close(done)
-	}()
-	return m, nil
-}
-
-func (m Model) sftpPreviewFile() (tea.Model, tea.Cmd) {
-	files := m.currentSFTPFiles()
-	cursor := m.sftpCursor[m.sftpFocus]
-	if cursor == 0 || cursor > len(files) {
-		m.setStatusMsg("No file selected")
-		return m, nil
-	}
-	entry := files[cursor-1]
-	if entry.IsDir {
-		m.setStatusMsg("Cannot preview a directory")
-		return m, nil
-	}
-
-	if m.sftpFocus == 0 {
-		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-		data, err := os.ReadFile(localPath)
-		if err != nil {
-			m.sftpPreview = fmt.Sprintf("Error: %v", err)
-			m.sftpPreviewing = true
-			return m, nil
-		}
-		if len(data) > 4096 {
-			data = data[:4096]
-		}
-		content := string(data)
-		if isBinaryContent(content) {
-			content = "[binary file]"
-		}
-		m.sftpPreview = content
-	} else {
-		remotePath := m.sftpRemoteDir + "/" + entry.Name
-		content, err := m.sftpClient.Preview(remotePath)
-		if err != nil {
-			m.sftpPreview = fmt.Sprintf("Error: %v", err)
-			m.sftpPreviewing = true
-			return m, nil
-		}
-		m.sftpPreview = content
-	}
-	m.sftpPreviewing = true
-	return m, nil
-}
-
-func (m Model) sftpConfirmRename() (tea.Model, tea.Cmd) {
-	files := m.currentSFTPFiles()
-	cursor := m.sftpCursor[m.sftpFocus]
-	if cursor == 0 || cursor > len(files) {
-		m.sftpRenaming = false
-		m.sftpRenameInput = ""
-		return m, nil
-	}
-
-	oldName := files[cursor-1].Name
-	newName := m.sftpRenameInput
-	m.sftpRenaming = false
-	m.sftpRenameInput = ""
-
-	if newName == "" || newName == oldName {
-		return m, nil
-	}
-
-	if m.sftpFocus == 0 {
-		oldPath := filepath.Join(m.sftpLocalDir, oldName)
-		newPath := filepath.Join(m.sftpLocalDir, newName)
-		if err := os.Rename(oldPath, newPath); err != nil {
-			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
-			return m, nil
-		}
-	} else {
-		oldPath := m.sftpRemoteDir + "/" + oldName
-		newPath := m.sftpRemoteDir + "/" + newName
-		if err := m.sftpClient.Rename(oldPath, newPath); err != nil {
-			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
-			return m, nil
-		}
-	}
-
-	m = m.refreshSFTPFiles()
-	return m, nil
-}
-
-func (m Model) refreshSFTPFiles() Model {
-	localFiles, err := sftp.ReadLocalDir(m.sftpLocalDir)
-	if err == nil {
-		m.sftpLocalFiles = localFiles
-	}
-	remoteFiles, err := m.sftpClient.ReadRemoteDir(m.sftpRemoteDir)
-	if err == nil {
-		m.sftpRemoteFiles = remoteFiles
-	}
-	return m
-}
-
-func isBinaryContent(s string) bool {
-	for _, r := range s {
-		if r == 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func (m Model) renderSFTPTabBar(panelWidth int) string {
-	activeStyle := lipgloss.NewStyle().
-		Background(colorAccent).
-		Foreground(colorPanel).
-		Bold(true).
-		Padding(0, 3)
-	inactiveStyle := lipgloss.NewStyle().
-		Foreground(colorMuted).
-		Background(colorSurface).
-		Padding(0, 3)
-
-	var left, right string
-	if m.sftpFocus == 0 {
-		left = activeStyle.Render("LOCAL")
-		right = inactiveStyle.Render("REMOTE")
-	} else {
-		left = inactiveStyle.Render("LOCAL")
-		right = activeStyle.Render("REMOTE")
-	}
-
-	tabs := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	return lipgloss.PlaceHorizontal(panelWidth*2+1, lipgloss.Center, tabs)
-}
-
-func (m Model) renderSFTPScreen() string {
-	width := renderWidth(m.width)
-	panelWidth := (width - 3) / 2
-	if panelWidth < 20 {
-		panelWidth = 20
-	}
-
-	var b strings.Builder
-	panelHeight := m.sftpVisibleHeight() + 2
-	b.WriteString(m.renderSFTPTabBar(panelWidth))
-	b.WriteString("\n")
-	localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, panelHeight, m.sftpFocus == 0)
-	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, panelHeight, m.sftpFocus == 1)
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, localPanel, " ", remotePanel))
-	b.WriteString("\n")
-
-	if m.sftpRenaming {
-		input := m.sftpRenameInput + "_"
-		hint := "Rename: " + input
-		confirmHint := "  [Enter]Confirm [Esc]Cancel"
-		rendered := warningStyle.Render(hint) + mutedStyle.Render(confirmHint)
-		b.WriteString(panelStyle(width-2, 0, true).Render(rendered))
-		b.WriteString("\n")
-	}
-
-	if m.sftpTransferring {
-		b.WriteString(panelStyle(width-2, 0, false).Render(m.renderSFTPProgress(width - 6)))
-		b.WriteString("\n")
-	}
-
-	if m.sftpPreviewing {
-		b.WriteString(panelStyle(width-2, m.sftpPreviewHeight()+2, true).Render(m.renderSFTPPreview(width-6, m.sftpPreviewHeight())))
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
-func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width, height int, focused bool) string {
-	var b strings.Builder
-
-	count := fmt.Sprintf("%d items", len(files))
-	title := eyebrowStyle.Render(label) + " " + mutedStyle.Render(count)
-	if focused {
-		title = accentStyle.Bold(true).Render(label) + " " + mutedStyle.Render(count)
-	}
-	title = title + lipgloss.PlaceHorizontal(width-lipgloss.Width(title)-2, lipgloss.Right, mutedStyle.Render(truncateMiddle(dir, max(10, width/2))))
-	b.WriteString(title)
-	b.WriteString("\n")
-	b.WriteString(lineStyle.Render(strings.Repeat("─", max(1, width-4))))
-	b.WriteString("\n")
-
-	visibleHeight := height - 4
-	if visibleHeight < 5 {
-		visibleHeight = 5
-	}
-
-	cursor := m.sftpCursor[panelIdx]
-	scroll := m.sftpScroll[panelIdx]
-	if cursor < scroll {
-		scroll = cursor
-	}
-	if cursor > scroll+visibleHeight-1 {
-		scroll = cursor - visibleHeight + 1
-	}
-
-	totalEntries := len(files) + 1
-	renderIdx := 0
-	for i := scroll; i < totalEntries && renderIdx < visibleHeight; i++ {
-		b.WriteString(m.renderSFTPEntryLine(files, i, cursor, width, focused))
-		b.WriteString("\n")
-		renderIdx++
-	}
-	for renderIdx < visibleHeight {
-		b.WriteString(mutedStyle.Render(strings.Repeat(" ", max(1, width-4))))
-		b.WriteString("\n")
-		renderIdx++
-	}
-
-	return panelStyle(width, height, focused).Render(b.String())
-}
-
-func (m Model) renderSFTPEntryLine(files []sftp.FileEntry, i, cursor, width int, focused bool) string {
-	var name, sizeStr string
-	var isDir bool
-
-	if i == 0 {
-		name = ".."
-		isDir = true
-	} else {
-		idx := i - 1
-		if idx >= len(files) {
-			return ""
-		}
-		entry := files[idx]
-		name = entry.Name
-		isDir = entry.IsDir
-		if !isDir && entry.Size > 0 {
-			sizeStr = formatBytes(entry.Size)
-		}
-	}
-
-	displayName := name
-	if isDir && i > 0 {
-		displayName = name + "/"
-	}
-
-	prefix := "  "
-	if i == cursor {
-		prefix = "❯ "
-	}
-	marker := " "
-	if isDir {
-		marker = "/"
-	}
-
-	var line string
-	if sizeStr != "" {
-		nameWidth := width - 8 - len(sizeStr)
-		if nameWidth < 5 {
-			nameWidth = 5
-		}
-		truncated := truncate(displayName, nameWidth)
-		padLen := width - 8 - lipgloss.Width(truncated) - len(sizeStr)
-		if padLen < 1 {
-			padLen = 1
-		}
-		line = prefix + marker + " " + truncated + strings.Repeat(" ", padLen) + sizeStr
-	} else {
-		line = prefix + marker + " " + truncate(displayName, width-8)
-	}
-
-	linePad := width - 4 - lipgloss.Width(line)
-	if linePad > 0 {
-		line += strings.Repeat(" ", linePad)
-	}
-
-	if i == cursor && focused {
-		return lipgloss.NewStyle().Foreground(colorSelected).Background(colorPanelHi).Bold(true).Render(line)
-	}
-	if i == cursor {
-		if isDir {
-			return dirStyle.Render(line)
-		} else {
-			return inactiveStyle.Render(line)
-		}
-	}
-	if isDir {
-		return dirStyle.Render(line)
-	}
-	return shortcutStyle.Render(line)
-}
-
-func (m Model) renderSFTPPreview(width, maxLines int) string {
-	var b strings.Builder
-	b.WriteString(accentStyle.Bold(true).Render("Preview"))
-	b.WriteString("\n")
-
-	lines := strings.Split(m.sftpPreview, "\n")
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-	}
-
-	previewStyle := lipgloss.NewStyle().Foreground(colorText).Width(width)
-	for _, line := range lines {
-		displayLine := truncate(line, width)
-		b.WriteString(previewStyle.Render(displayLine))
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
-func (m Model) renderSFTPProgress(width int) string {
-	p := m.sftpProgress
-	if p == nil {
-		return ""
-	}
-	var pct float64
-	doneNow := atomic.LoadInt64(&p.Done)
-	totalNow := atomic.LoadInt64(&p.Total)
-	if totalNow > 0 {
-		pct = float64(doneNow) / float64(totalNow)
-		if pct > 1 {
-			pct = 1
-		}
-	}
-
-	var speedStr string
-	if p.Speed > 0 {
-		speedStr = " " + formatTransferSpeed(p.Speed)
-	}
-
-	barWidth := width
-	if barWidth < 20 {
-		barWidth = 20
-	}
-
-	infoLine := warningStyle.Render(fmt.Sprintf("%s %s %.0f%%%s", m.sftpDirection, p.File, pct*100, speedStr))
-
-	return infoLine + "\n" + renderProgressBar(pct, barWidth)
-}
-
-func renderProgressBar(pct float64, width int) string {
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 1 {
-		pct = 1
-	}
-	if width < 1 {
-		return ""
-	}
-	filled := int(float64(width) * pct)
-	if pct > 0 && filled == 0 {
-		filled = 1
-	}
-	if filled > width {
-		filled = width
-	}
-	bar := successStyle.Render(strings.Repeat("━", filled)) + mutedStyle.Render(strings.Repeat("━", width-filled))
-	return bar
 }

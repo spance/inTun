@@ -1,10 +1,13 @@
 package sftp
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,6 +26,7 @@ type FileEntry struct {
 }
 
 type ProgressInfo struct {
+	mu        sync.RWMutex
 	Done      int64
 	Total     int64
 	File      string
@@ -30,6 +34,64 @@ type ProgressInfo struct {
 	FileCount int
 	Speed     int64
 	Active    bool
+}
+
+type ProgressSnapshot struct {
+	Done      int64
+	Total     int64
+	File      string
+	FileIndex int
+	FileCount int
+	Speed     int64
+	Active    bool
+}
+
+func NewProgressInfo(file string, total int64) *ProgressInfo {
+	return &ProgressInfo{
+		File:   file,
+		Total:  total,
+		Active: true,
+	}
+}
+
+func (p *ProgressInfo) SetDone(done int64) {
+	p.mu.Lock()
+	p.Done = done
+	p.mu.Unlock()
+}
+
+func (p *ProgressInfo) SetRecursive(done, total int64, file string) {
+	p.mu.Lock()
+	p.Done = done
+	p.Total = total
+	p.File = file
+	p.mu.Unlock()
+}
+
+func (p *ProgressInfo) SetSpeed(speed int64) {
+	p.mu.Lock()
+	p.Speed = speed
+	p.mu.Unlock()
+}
+
+func (p *ProgressInfo) SetActive(active bool) {
+	p.mu.Lock()
+	p.Active = active
+	p.mu.Unlock()
+}
+
+func (p *ProgressInfo) Snapshot() ProgressSnapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return ProgressSnapshot{
+		Done:      p.Done,
+		Total:     p.Total,
+		File:      p.File,
+		FileIndex: p.FileIndex,
+		FileCount: p.FileCount,
+		Speed:     p.Speed,
+		Active:    p.Active,
+	}
 }
 
 type Client struct {
@@ -42,16 +104,22 @@ func NewClient(c *sftp.Client) *Client {
 }
 
 func (s *Client) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.client.Close()
 }
 
 const maxDirEntries = 1000
 
-func (s *Client) ReadRemoteDir(path string) ([]FileEntry, error) {
+func (s *Client) ReadRemoteDir(ctx context.Context, path string) ([]FileEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	infos, err := s.client.ReadDir(path)
+	if err := checkCanceled(ctx); err != nil {
+		return nil, err
+	}
+
+	infos, err := s.client.ReadDirContext(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -115,97 +183,147 @@ func sortEntries(entries []FileEntry) {
 	})
 }
 
-func (s *Client) Download(remotePath, localPath string, progress func(int64)) error {
+func JoinRemotePath(base string, parts ...string) string {
+	path := strings.TrimRight(base, "/")
+	for _, part := range parts {
+		part = filepath.ToSlash(part)
+		part = strings.ReplaceAll(part, "\\", "/")
+		part = strings.Trim(part, "/")
+		if part == "" || part == "." {
+			continue
+		}
+		if path == "" {
+			path = "/" + part
+		} else {
+			path += "/" + part
+		}
+	}
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func RemoteDir(remotePath string) string {
+	dir := pathpkg.Dir(remotePath)
+	if dir == "." {
+		return "/"
+	}
+	return dir
+}
+
+func RemoteBase(remotePath string) string {
+	return pathpkg.Base(remotePath)
+}
+
+func RemoteRel(base, target string) (string, error) {
+	base = pathpkg.Clean(base)
+	target = pathpkg.Clean(target)
+	if base == "." || base == "/" {
+		return strings.TrimPrefix(target, "/"), nil
+	}
+	if target == base {
+		return ".", nil
+	}
+	prefix := strings.TrimRight(base, "/") + "/"
+	if !strings.HasPrefix(target, prefix) {
+		return "", fmt.Errorf("%q is not under %q", target, base)
+	}
+	return strings.TrimPrefix(target, prefix), nil
+}
+
+func checkCanceled(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func (s *Client) Download(ctx context.Context, remotePath, localPath string, progress func(int64)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
 
 	r, err := s.client.Open(remotePath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	stopWatchingRemote := closeOnCancel(ctx, r)
+	defer stopWatchingRemote()
 
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return err
+	}
 	w, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
 	defer w.Close()
+	stopWatchingLocal := closeOnCancel(ctx, w)
+	defer stopWatchingLocal()
 
-	buf := make([]byte, 32*1024)
-	var total int64
-	for {
-		n, readErr := r.Read(buf)
-		if n > 0 {
-			_, writeErr := w.Write(buf[:n])
-			if writeErr != nil {
-				return writeErr
-			}
-			total += int64(n)
-			if progress != nil {
-				progress(total)
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
-	return nil
+	return copyWithContext(ctx, r, w, progress)
 }
 
-func (s *Client) Upload(localPath, remotePath string, progress func(int64)) error {
+func (s *Client) Upload(ctx context.Context, localPath, remotePath string, progress func(int64)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
 
 	r, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	stopWatchingLocal := closeOnCancel(ctx, r)
+	defer stopWatchingLocal()
 
+	if err := s.client.MkdirAll(RemoteDir(remotePath)); err != nil {
+		return err
+	}
 	w, err := s.client.Create(remotePath)
 	if err != nil {
 		return err
 	}
 	defer w.Close()
+	stopWatchingRemote := closeOnCancel(ctx, w)
+	defer stopWatchingRemote()
 
-	buf := make([]byte, 32*1024)
-	var total int64
-	for {
-		n, readErr := r.Read(buf)
-		if n > 0 {
-			_, writeErr := w.Write(buf[:n])
-			if writeErr != nil {
-				return writeErr
-			}
-			total += int64(n)
-			if progress != nil {
-				progress(total)
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
-	return nil
+	return copyWithContext(ctx, r, w, progress)
 }
 
-func (s *Client) Preview(path string) (string, error) {
+func (s *Client) Preview(ctx context.Context, path string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := checkCanceled(ctx); err != nil {
+		return "", err
+	}
 
 	r, err := s.client.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer r.Close()
+	stopWatching := closeOnCancel(ctx, r)
+	defer stopWatching()
 
 	buf := make([]byte, 4096)
+	if err := checkCanceled(ctx); err != nil {
+		return "", err
+	}
 	n, err := r.Read(buf)
 	if err != nil && err != io.EOF {
 		return "", err
@@ -217,7 +335,7 @@ func (s *Client) Preview(path string) (string, error) {
 	}
 
 	if n > 0 {
-		cmd := exec.Command("file", "-")
+		cmd := exec.CommandContext(ctx, "file", "-")
 		cmd.Stdin = strings.NewReader(string(buf[:n]))
 		out, err := cmd.Output()
 		if err == nil && len(out) > 0 {
@@ -232,9 +350,12 @@ func (s *Client) Preview(path string) (string, error) {
 	return "[binary file]", nil
 }
 
-func (s *Client) Rename(oldPath, newPath string) error {
+func (s *Client) Rename(ctx context.Context, oldPath, newPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
 	return s.client.Rename(oldPath, newPath)
 }
 
@@ -247,15 +368,22 @@ func isBinary(s string) bool {
 	return false
 }
 
-func (s *Client) DownloadDir(remoteDir, localDir string, progress func(done, total int64, file string)) error {
+func (s *Client) DownloadDir(ctx context.Context, sourceRemoteDir, localDir string, progress func(done, total int64, file string)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
+
 	var totalSize int64
-	walker := s.client.Walk(remoteDir)
+	walker := s.client.Walk(sourceRemoteDir)
 	for walker.Step() {
+		if err := checkCanceled(ctx); err != nil {
+			return err
+		}
 		if err := walker.Err(); err != nil {
-			continue
+			return err
 		}
 		stat := walker.Stat()
 		if stat != nil && !stat.IsDir() {
@@ -263,11 +391,14 @@ func (s *Client) DownloadDir(remoteDir, localDir string, progress func(done, tot
 		}
 	}
 
-	walker = s.client.Walk(remoteDir)
+	walker = s.client.Walk(sourceRemoteDir)
 	var done int64
 	for walker.Step() {
+		if err := checkCanceled(ctx); err != nil {
+			return err
+		}
 		if err := walker.Err(); err != nil {
-			continue
+			return err
 		}
 		path := walker.Path()
 		stat := walker.Stat()
@@ -275,43 +406,64 @@ func (s *Client) DownloadDir(remoteDir, localDir string, progress func(done, tot
 			continue
 		}
 
-		rel, err := filepath.Rel(remoteDir, path)
+		rel, err := RemoteRel(sourceRemoteDir, path)
 		if err != nil {
-			continue
+			return err
 		}
 		localPath := filepath.Join(localDir, rel)
 
 		if stat.IsDir() {
-			os.MkdirAll(localPath, 0755)
+			if err := os.MkdirAll(localPath, 0755); err != nil {
+				return err
+			}
 			continue
 		}
 
-		if err := s.copyRemoteToLocal(path, localPath); err != nil {
+		if err := s.copyRemoteToLocal(ctx, path, localPath); err != nil {
 			return err
 		}
 		done += stat.Size()
 		if progress != nil {
-			progress(done, totalSize, filepath.Base(path))
+			progress(done, totalSize, RemoteBase(path))
 		}
 	}
 	return nil
 }
 
-func (s *Client) UploadDir(localDir, remoteDir string, progress func(done, total int64, file string)) error {
+func (s *Client) UploadDir(ctx context.Context, localDir, targetRemoteDir string, progress func(done, total int64, file string)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
+
 	var totalSize int64
-	filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	if err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if cancelErr := checkCanceled(ctx); cancelErr != nil {
+			return cancelErr
+		}
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
 			return nil
 		}
 		totalSize += info.Size()
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	if err := s.client.MkdirAll(targetRemoteDir); err != nil {
+		return err
+	}
 
 	var done int64
 	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if cancelErr := checkCanceled(ctx); cancelErr != nil {
+			return cancelErr
+		}
 		if err != nil {
 			return err
 		}
@@ -320,14 +472,13 @@ func (s *Client) UploadDir(localDir, remoteDir string, progress func(done, total
 		if err != nil {
 			return err
 		}
-		remotePath := remoteDir + "/" + rel
+		remotePath := JoinRemotePath(targetRemoteDir, rel)
 
 		if info.IsDir() {
-			s.client.Mkdir(remotePath)
-			return nil
+			return s.client.MkdirAll(remotePath)
 		}
 
-		if err := s.copyLocalToRemote(path, remotePath); err != nil {
+		if err := s.copyLocalToRemote(ctx, path, remotePath); err != nil {
 			return err
 		}
 		done += info.Size()
@@ -339,38 +490,114 @@ func (s *Client) UploadDir(localDir, remoteDir string, progress func(done, total
 	return err
 }
 
-func (s *Client) copyRemoteToLocal(remotePath, localPath string) error {
+func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath string) error {
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
 	r, err := s.client.Open(remotePath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	stopWatchingRemote := closeOnCancel(ctx, r)
+	defer stopWatchingRemote()
 
-	os.MkdirAll(filepath.Dir(localPath), 0755)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return err
+	}
 	w, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
 	defer w.Close()
+	stopWatchingLocal := closeOnCancel(ctx, w)
+	defer stopWatchingLocal()
 
-	_, err = io.Copy(w, r)
-	return err
+	return copyWithContext(ctx, r, w, nil)
 }
 
-func (s *Client) copyLocalToRemote(localPath, remotePath string) error {
+func (s *Client) copyLocalToRemote(ctx context.Context, localPath, remotePath string) error {
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
 	r, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	stopWatchingLocal := closeOnCancel(ctx, r)
+	defer stopWatchingLocal()
 
-	s.client.Mkdir(filepath.Dir(remotePath))
+	if err := s.client.MkdirAll(RemoteDir(remotePath)); err != nil {
+		return err
+	}
 	w, err := s.client.Create(remotePath)
 	if err != nil {
 		return err
 	}
 	defer w.Close()
+	stopWatchingRemote := closeOnCancel(ctx, w)
+	defer stopWatchingRemote()
 
-	_, err = io.Copy(w, r)
-	return err
+	return copyWithContext(ctx, r, w, nil)
+}
+
+func copyWithContext(ctx context.Context, r io.Reader, w io.Writer, progress func(int64)) error {
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		if err := checkCanceled(ctx); err != nil {
+			return err
+		}
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			if err := checkCanceled(ctx); err != nil {
+				return err
+			}
+			written, writeErr := w.Write(buf[:n])
+			if writeErr != nil {
+				if ctxErr := checkCanceled(ctx); ctxErr != nil {
+					return ctxErr
+				}
+				return writeErr
+			}
+			if written != n {
+				if ctxErr := checkCanceled(ctx); ctxErr != nil {
+					return ctxErr
+				}
+				return io.ErrShortWrite
+			}
+			total += int64(n)
+			if progress != nil {
+				progress(total)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			if ctxErr := checkCanceled(ctx); ctxErr != nil {
+				return ctxErr
+			}
+			return readErr
+		}
+	}
+	return checkCanceled(ctx)
+}
+
+func closeOnCancel(ctx context.Context, c io.Closer) func() {
+	if ctx == nil || c == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+	}
 }

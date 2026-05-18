@@ -1,8 +1,13 @@
 package sftp
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -33,6 +38,27 @@ func TestReadLocalDir(t *testing.T) {
 	}
 	if !found["subdir"] || !found["file.txt"] || !found[".hidden"] {
 		t.Error("missing expected entries")
+	}
+}
+
+type shortWriter struct {
+	bytes.Buffer
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return w.Buffer.Write(p[:len(p)-1])
+}
+
+func TestCopyWithContextDetectsShortWrite(t *testing.T) {
+	src := bytes.NewReader([]byte("hello"))
+	var dst shortWriter
+
+	err := copyWithContext(context.Background(), src, &dst, nil)
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("copyWithContext error = %v, want io.ErrShortWrite", err)
 	}
 }
 
@@ -98,5 +124,120 @@ func TestIsBinary(t *testing.T) {
 	}
 	if !isBinary("hello\x00world") {
 		t.Error("string with null byte should be binary")
+	}
+}
+
+func TestProgressInfoSnapshot(t *testing.T) {
+	progress := NewProgressInfo("initial.txt", 100)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := int64(0); i < 100; i++ {
+			progress.SetRecursive(i, 100, "current.txt")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := int64(0); i < 100; i++ {
+			progress.SetSpeed(i)
+			_ = progress.Snapshot()
+		}
+	}()
+	wg.Wait()
+
+	snapshot := progress.Snapshot()
+	if snapshot.File != "current.txt" {
+		t.Fatalf("File = %q, want current.txt", snapshot.File)
+	}
+	if snapshot.Total != 100 {
+		t.Fatalf("Total = %d, want 100", snapshot.Total)
+	}
+	if !snapshot.Active {
+		t.Fatal("progress should remain active")
+	}
+}
+
+func TestJoinRemotePath(t *testing.T) {
+	tests := []struct {
+		base  string
+		parts []string
+		want  string
+	}{
+		{base: "/", parts: []string{"file.txt"}, want: "/file.txt"},
+		{base: "/home/user", parts: []string{"file.txt"}, want: "/home/user/file.txt"},
+		{base: "/home/user/", parts: []string{"/dir/", "file.txt"}, want: "/home/user/dir/file.txt"},
+		{base: "/home/user", parts: []string{"dir\\file.txt"}, want: "/home/user/dir/file.txt"},
+		{base: "", parts: []string{"dir", "file.txt"}, want: "/dir/file.txt"},
+		{base: "/", parts: nil, want: "/"},
+	}
+
+	for _, tt := range tests {
+		got := JoinRemotePath(tt.base, tt.parts...)
+		if got != tt.want {
+			t.Fatalf("JoinRemotePath(%q, %v) = %q, want %q", tt.base, tt.parts, got, tt.want)
+		}
+	}
+}
+
+func TestRemotePathHelpers(t *testing.T) {
+	if got := RemoteDir("/home/user/project"); got != "/home/user" {
+		t.Fatalf("RemoteDir = %q, want /home/user", got)
+	}
+	if got := RemoteDir("/"); got != "/" {
+		t.Fatalf("RemoteDir root = %q, want /", got)
+	}
+	if got := RemoteBase("/home/user/file.txt"); got != "file.txt" {
+		t.Fatalf("RemoteBase = %q, want file.txt", got)
+	}
+
+	rel, err := RemoteRel("/home/user", "/home/user/dir/file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "dir/file.txt" {
+		t.Fatalf("RemoteRel = %q, want dir/file.txt", rel)
+	}
+	rel, err = RemoteRel("/", "/home/user/file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "home/user/file.txt" {
+		t.Fatalf("RemoteRel root = %q, want home/user/file.txt", rel)
+	}
+	if _, err := RemoteRel("/home/user", "/other/file.txt"); err == nil {
+		t.Fatal("RemoteRel should reject paths outside base")
+	}
+}
+
+func TestCheckCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := checkCanceled(ctx); err != context.Canceled {
+		t.Fatalf("checkCanceled = %v, want context.Canceled", err)
+	}
+	if err := checkCanceled(context.Background()); err != nil {
+		t.Fatalf("uncancelled context returned %v", err)
+	}
+}
+
+func TestCopyWithContextCancelsBetweenChunks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	src := bytes.NewReader(bytes.Repeat([]byte("x"), 96*1024))
+	var dst bytes.Buffer
+	err := copyWithContext(ctx, src, &dst, func(int64) {
+		cancel()
+	})
+	if err != context.Canceled {
+		t.Fatalf("copyWithContext error = %v, want context.Canceled", err)
+	}
+	if dst.Len() == 0 {
+		t.Fatal("expected first chunk to be copied before cancellation")
+	}
+	if dst.Len() >= 96*1024 {
+		t.Fatalf("copy should stop before full input, copied %d", dst.Len())
 	}
 }

@@ -18,6 +18,7 @@ Interactive SSH Tunnel - 跨平台 SSH 隧道管理器，基于纯 Go 实现，�
 - **密码认证**：通过 TUI 交互式输入密码，支持键盘交互式认证
 - **连接健康检测**：SSH/TCP 双重保活，连接断开自动提示重连
 - **远程隧道 LAN 目标**：本地目标和远程监听均支持 `ip:port` 格式
+- **内置 SFTP 管理器**：本地/远程双面板浏览，支持文件同步、目录同步、重命名和预览
 - **键盘驱动界面**：快捷键操作，高效导航
 
 ## 安装
@@ -63,20 +64,37 @@ make install    # 构建并复制到 /usr/local/bin/
 
 ### 快捷键
 
+主界面：
+
 | 按键 | 操作 |
 |------|------|
 | `c` | 创建隧道 |
 | `r` | 重新连接 |
 | `s` | 停止/启动 |
 | `d` | 删除隧道 |
+| `f` | 为运行中的隧道打开 SFTP 文件管理器 |
 | `↑↓` | 导航选择 |
 | `e` | 退出 |
+
+SFTP 界面：
+
+| 按键 | 操作 |
+|------|------|
+| `Tab` | 切换本地/远程面板 |
+| `↑↓` / `PgUp` / `PgDn` | 导航并滚动文件列表 |
+| `Enter` | 进入目录或返回父目录 |
+| `s` | 按当前激活面板方向同步选中文件 |
+| `r` | 二次确认后递归同步选中目录 |
+| `n` | 重命名选中项 |
+| `v` | 预览选中文件 |
+| `q` / `Esc` | 关闭预览或退出 SFTP |
 
 ## 系统要求
 
 - Go 1.21+（构建时）
 - SSH 私钥：`~/.ssh/id_rsa`、`id_ed25519` 或 `id_ecdsa`，或使用密码认证
 - SSH 配置文件：`~/.ssh/config`（可选，用于主机发现）
+- 远端 SSH 服务启用 SFTP 子系统（仅使用 SFTP 管理器时需要）
 
 ## 配置
 
@@ -103,8 +121,10 @@ Host myserver
 
 - **UI 框架**: [bubbletea](https://github.com/charmbracelet/bubbletea) (Charm TUI)
 - **SSH 库**: [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh)
+- **SFTP 库**: [github.com/pkg/sftp](https://github.com/pkg/sftp)
 - **样式渲染**: [lipgloss](https://github.com/charmbracelet/lipgloss)
 - **统计监控**: 1秒间隔采样，5秒间隔 SSH 探测，TX/RX 总量 + ↑↓ 速率指示
+- **TUI 安全性**: 共享 modal 弹窗、可取消的 SFTP 操作、串行化 SFTP 客户端访问
 
 ## 开发
 
@@ -142,7 +162,8 @@ internal/
   ├── platform/            # SSH 连接、主机密钥管理、Mock 测试
   ├── tunnel/              # 隧道生命周期管理（线程安全）
   ├── monitor/             # 统计监控（同步更新）
-  └── tui/                 # TUI 界面渲染 + 认证队列
+  ├── sftp/                # SFTP 读写、同步、预览、重命名
+  └── tui/                 # TUI 模型、共享 modal、SFTP 动作与渲染
 ```
 
 ## 许可协议
