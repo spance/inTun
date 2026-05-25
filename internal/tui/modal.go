@@ -174,6 +174,10 @@ func modalMessageParts(msg string) ([]string, []ModalField) {
 	for _, line := range strings.Split(msg, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
+		case strings.HasPrefix(trimmed, "SOURCE:"):
+			fields = append(fields, ModalField{Label: "SOURCE", Value: strings.TrimSpace(strings.TrimPrefix(trimmed, "SOURCE:"))})
+		case strings.HasPrefix(trimmed, "DESTINATION:"):
+			fields = append(fields, ModalField{Label: "DESTINATION", Value: strings.TrimSpace(strings.TrimPrefix(trimmed, "DESTINATION:"))})
 		case strings.HasPrefix(trimmed, "FROM:"):
 			fields = append(fields, ModalField{Label: "FROM", Value: strings.TrimSpace(strings.TrimPrefix(trimmed, "FROM:"))})
 		case strings.HasPrefix(trimmed, "TO:"):

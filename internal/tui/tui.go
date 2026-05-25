@@ -358,29 +358,32 @@ type Model struct {
 	cancelCtx     context.Context
 	cancelFunc    context.CancelFunc
 
-	sftpClient         *sftp.Client
-	sftpLocalDir       string
-	sftpRemoteDir      string
-	sftpLocalFiles     []sftp.FileEntry
-	sftpRemoteFiles    []sftp.FileEntry
-	sftpFocus          int
-	sftpCursor         [2]int
-	sftpScroll         [2]int
-	sftpTransferring   bool
-	sftpProgress       *sftp.ProgressInfo
-	sftpPreview        string
-	sftpPreviewing     bool
-	sftpCancel         context.CancelFunc
-	sftpTransferID     int
-	sftpTunnelID       int
-	sftpHostLabel      string
-	sftpDone           chan sftpTransferResult
-	sftpDirection      string
-	sftpPrevDone       int64
-	sftpRenaming       bool
-	sftpRenameInput    string
-	sftpSyncConfirm    bool
-	sftpSyncConfirmMsg string
+	sftpClient              *sftp.Client
+	sftpLocalDir            string
+	sftpRemoteDir           string
+	sftpLocalFiles          []sftp.FileEntry
+	sftpRemoteFiles         []sftp.FileEntry
+	sftpFocus               int
+	sftpCursor              [2]int
+	sftpScroll              [2]int
+	sftpTransferring        bool
+	sftpProgress            *sftp.ProgressInfo
+	sftpPreview             string
+	sftpPreviewing          bool
+	sftpCancel              context.CancelFunc
+	sftpTransferID          int
+	sftpTunnelID            int
+	sftpHostLabel           string
+	sftpDone                chan sftpTransferResult
+	sftpDirection           string
+	sftpPrevDone            int64
+	sftpRenaming            bool
+	sftpRenameInput         string
+	sftpSyncConfirm         bool
+	sftpSyncConfirmMsg      string
+	sftpOverwriteConfirm    bool
+	sftpOverwriteConfirmMsg string
+	sftpPendingSync         sftpPendingSync
 }
 
 type sftpTransferResult struct {
@@ -389,6 +392,15 @@ type sftpTransferResult struct {
 	source    string
 	target    string
 	direction string
+	report    sftp.TransferReport
+}
+
+type sftpPendingSync struct {
+	focus  int
+	source string
+	target string
+	name   string
+	size   int64
 }
 
 func (m *Model) setStatusMsg(msg string) {
@@ -1277,10 +1289,23 @@ func (m Model) renderQuitConfirmModal(width int) ModalView {
 }
 
 func (m Model) renderStatusOverlay(width int) ModalView {
+	if m.sftpOverwriteConfirm {
+		body, fields := modalMessageParts(m.sftpOverwriteConfirmMsg)
+		return renderModalSpec(width, ModalSpec{
+			Title:    "Confirm Overwrite",
+			Severity: ModalDanger,
+			Body:     body,
+			Fields:   fields,
+			Actions: []ModalAction{
+				{Key: "Enter", Label: "Overwrite"},
+				{Key: "Esc", Label: "Cancel"},
+			},
+		})
+	}
 	if m.sftpSyncConfirm {
 		body, fields := modalMessageParts(m.sftpSyncConfirmMsg)
 		return renderModalSpec(width, ModalSpec{
-			Title:    "Confirm Sync",
+			Title:    "Confirm Directory Sync",
 			Severity: ModalWarning,
 			Body:     body,
 			Fields:   fields,

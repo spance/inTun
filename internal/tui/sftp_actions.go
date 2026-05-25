@@ -47,6 +47,22 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.sftpOverwriteConfirm {
+		switch msg.String() {
+		case "enter":
+			pending := m.sftpPendingSync
+			m.sftpOverwriteConfirm = false
+			m.sftpOverwriteConfirmMsg = ""
+			m.sftpPendingSync = sftpPendingSync{}
+			return m.sftpDoSingleSync(pending)
+		case "esc":
+			m.sftpOverwriteConfirm = false
+			m.sftpOverwriteConfirmMsg = ""
+			m.sftpPendingSync = sftpPendingSync{}
+		}
+		return m, nil
+	}
+
 	if m.sftpSyncConfirm {
 		switch msg.String() {
 		case "enter":
@@ -81,6 +97,9 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.sftpTransferring = false
 		m.sftpDone = nil
+		m.sftpOverwriteConfirm = false
+		m.sftpOverwriteConfirmMsg = ""
+		m.sftpPendingSync = sftpPendingSync{}
 		m.screen = ScreenMain
 		return m, nil
 	case "tab":
@@ -309,25 +328,8 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 		}
 		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
 		remotePath := sftp.JoinRemotePath(m.sftpRemoteDir, entry.Name)
-		m.sftpTransferring = true
-		m.sftpDirection = "↑"
-		m.sftpProgress = sftp.NewProgressInfo(entry.Name, entry.Size)
-		m.sftpPrevDone = 0
-		done := make(chan sftpTransferResult, 1)
-		m.sftpDone = done
-		m.sftpTransferID++
-		transferID := m.sftpTransferID
-		ctx, cancel := context.WithCancel(m.sftpContext())
-		m.sftpCancel = cancel
-		client := m.sftpClient
-		progress := m.sftpProgress
-		go func() {
-			err := client.Upload(ctx, localPath, remotePath, func(n int64) {
-				progress.SetDone(n)
-			})
-			done <- sftpTransferResult{id: transferID, err: err, source: localPath, target: remotePath, direction: "upload"}
-		}()
-		return m, nil
+		pending := sftpPendingSync{focus: 0, source: localPath, target: remotePath, name: entry.Name, size: entry.Size}
+		return m.sftpStartSingleSync(pending)
 	}
 
 	files := m.sftpRemoteFiles
@@ -343,9 +345,62 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 	}
 	remotePath := sftp.JoinRemotePath(m.sftpRemoteDir, entry.Name)
 	localPath := filepath.Join(m.sftpLocalDir, entry.Name)
+	pending := sftpPendingSync{focus: 1, source: remotePath, target: localPath, name: entry.Name, size: entry.Size}
+	return m.sftpStartSingleSync(pending)
+}
+
+func (m Model) sftpStartSingleSync(pending sftpPendingSync) (tea.Model, tea.Cmd) {
+	report, err := m.singleSyncOverwriteReport(pending)
+	if err != nil {
+		m.setStatusMsg(fmt.Sprintf("Cannot check overwrite risk: %v", err))
+		return m, nil
+	}
+	if report.HasOverwrites() {
+		m.sftpOverwriteConfirm = true
+		m.sftpPendingSync = pending
+		m.sftpOverwriteConfirmMsg = formatFileOverwriteConfirmMessage(pending.focus, pending.source, pending.target, report)
+		return m, nil
+	}
+	return m.sftpDoSingleSync(pending)
+}
+
+func (m Model) singleSyncOverwriteReport(pending sftpPendingSync) (sftp.OverwriteReport, error) {
+	var report sftp.OverwriteReport
+	if pending.focus == 0 {
+		entry, exists, err := m.sftpClient.RemotePathInfo(m.sftpContext(), pending.target)
+		if err != nil {
+			report.AddExisting(pending.target, "unable to verify: "+err.Error())
+			return report, nil
+		}
+		if exists {
+			report.AddExisting(pending.target, sftp.FileEntryKind(entry))
+		}
+		return report, nil
+	}
+
+	entry, exists, err := sftp.LocalPathInfo(pending.target)
+	if err != nil {
+		report.AddExisting(pending.target, "unable to verify: "+err.Error())
+		return report, nil
+	}
+	if exists {
+		report.AddExisting(pending.target, sftp.FileEntryKind(entry))
+	}
+	return report, nil
+}
+
+func (m Model) sftpDoSingleSync(pending sftpPendingSync) (tea.Model, tea.Cmd) {
+	if pending.source == "" || pending.target == "" {
+		m.setStatusMsg("No file selected")
+		return m, nil
+	}
+
 	m.sftpTransferring = true
 	m.sftpDirection = "↓"
-	m.sftpProgress = sftp.NewProgressInfo(entry.Name, entry.Size)
+	if pending.focus == 0 {
+		m.sftpDirection = "↑"
+	}
+	m.sftpProgress = sftp.NewProgressInfo(pending.name, pending.size)
 	m.sftpPrevDone = 0
 	done := make(chan sftpTransferResult, 1)
 	m.sftpDone = done
@@ -356,10 +411,19 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 	client := m.sftpClient
 	progress := m.sftpProgress
 	go func() {
-		err := client.Download(ctx, remotePath, localPath, func(n int64) {
-			progress.SetDone(n)
-		})
-		done <- sftpTransferResult{id: transferID, err: err, source: remotePath, target: localPath, direction: "download"}
+		var err error
+		direction := "download"
+		if pending.focus == 0 {
+			direction = "upload"
+			err = client.Upload(ctx, pending.source, pending.target, func(n int64) {
+				progress.SetDone(n)
+			})
+		} else {
+			err = client.Download(ctx, pending.source, pending.target, func(n int64) {
+				progress.SetDone(n)
+			})
+		}
+		done <- sftpTransferResult{id: transferID, err: err, source: pending.source, target: pending.target, direction: direction}
 	}()
 	return m, nil
 }
@@ -386,9 +450,76 @@ func (m Model) sftpStartRecursiveConfirm() (tea.Model, tea.Cmd) {
 		dst = filepath.Join(m.sftpLocalDir, entry.Name)
 	}
 
+	var overwriteReport sftp.OverwriteReport
+	var err error
+	if m.sftpFocus == 0 {
+		overwriteReport, err = m.sftpClient.UploadDirOverwriteReport(m.sftpContext(), src, dst)
+	} else {
+		overwriteReport, err = m.sftpClient.DownloadDirOverwriteReport(m.sftpContext(), src, dst)
+	}
+	if err != nil {
+		m.setStatusMsg(fmt.Sprintf("Cannot check overwrite risk: %v", err))
+		return m, nil
+	}
+
 	m.sftpSyncConfirm = true
-	m.sftpSyncConfirmMsg = fmt.Sprintf("FROM: %s\n  TO: %s", src, dst)
+	m.sftpSyncConfirmMsg = formatDirectorySyncConfirmMessage(m.sftpFocus, src, dst, overwriteReport)
 	return m, nil
+}
+
+func formatFileOverwriteConfirmMessage(focus int, src, dst string, overwriteReport sftp.OverwriteReport) string {
+	direction, source, destination := syncDirectionLabels(focus)
+	var b strings.Builder
+	b.WriteString(direction)
+	b.WriteString("\nOVERWRITE FILE")
+	if warning := formatOverwriteWarning(overwriteReport); warning != "" {
+		b.WriteString("\n")
+		b.WriteString(warning)
+	}
+	b.WriteString(fmt.Sprintf("\nSOURCE: %s  %s\nDESTINATION: %s  %s", source, src, destination, dst))
+	return b.String()
+}
+
+func formatDirectorySyncConfirmMessage(focus int, src, dst string, overwriteReport sftp.OverwriteReport) string {
+	direction, source, destination := syncDirectionLabels(focus)
+	var b strings.Builder
+	b.WriteString(direction)
+	if warning := formatOverwriteWarning(overwriteReport); warning != "" {
+		b.WriteString("\n")
+		b.WriteString(warning)
+	}
+	b.WriteString(fmt.Sprintf("\nSOURCE: %s  %s\nDESTINATION: %s  %s", source, src, destination, dst))
+	return b.String()
+}
+
+func syncDirectionLabels(focus int) (direction, source, destination string) {
+	direction = "LOCAL -> REMOTE  UPLOAD"
+	source = "LOCAL"
+	destination = "REMOTE"
+	if focus == 1 {
+		direction = "REMOTE -> LOCAL  DOWNLOAD"
+		source = "REMOTE"
+		destination = "LOCAL"
+	}
+	return direction, source, destination
+}
+
+func formatOverwriteWarning(report sftp.OverwriteReport) string {
+	if !report.HasOverwrites() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("OVERWRITE: %d existing target item(s)", report.Count))
+	for _, item := range report.Items {
+		b.WriteString("\n- ")
+		b.WriteString(item.Path)
+		b.WriteString(": ")
+		b.WriteString(item.Kind)
+	}
+	if remaining := report.Count - len(report.Items); remaining > 0 {
+		b.WriteString(fmt.Sprintf("\n- ... %d more", remaining))
+	}
+	return b.String()
 }
 
 func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
@@ -417,10 +548,10 @@ func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
 		client := m.sftpClient
 		progress := m.sftpProgress
 		go func() {
-			err := client.UploadDir(ctx, localPath, remotePath, func(done, total int64, file string) {
+			report, err := client.UploadDir(ctx, localPath, remotePath, func(done, total int64, file string) {
 				progress.SetRecursive(done, total, file)
 			})
-			done <- sftpTransferResult{id: transferID, err: err, source: localPath, target: remotePath, direction: "upload"}
+			done <- sftpTransferResult{id: transferID, err: err, source: localPath, target: remotePath, direction: "upload", report: report}
 		}()
 		return m, nil
 	}
@@ -449,10 +580,10 @@ func (m Model) sftpDoRecursive() (tea.Model, tea.Cmd) {
 	client := m.sftpClient
 	progress := m.sftpProgress
 	go func() {
-		err := client.DownloadDir(ctx, remotePath, localPath, func(done, total int64, file string) {
+		report, err := client.DownloadDir(ctx, remotePath, localPath, func(done, total int64, file string) {
 			progress.SetRecursive(done, total, file)
 		})
-		done <- sftpTransferResult{id: transferID, err: err, source: remotePath, target: localPath, direction: "download"}
+		done <- sftpTransferResult{id: transferID, err: err, source: remotePath, target: localPath, direction: "download", report: report}
 	}()
 	return m, nil
 }
@@ -615,12 +746,39 @@ func formatSFTPTransferError(result sftpTransferResult) string {
 	if result.err == context.Canceled {
 		return fmt.Sprintf("SFTP %s cancelled", result.direction)
 	}
-	return fmt.Sprintf("SFTP %s failed: %v\nFROM: %s\n  TO: %s", result.direction, result.err, result.source, result.target)
+	msg := fmt.Sprintf("SFTP %s failed: %v", result.direction, result.err)
+	if skipped := formatSkippedReport(result.report); skipped != "" {
+		msg += "\n" + skipped
+	}
+	return fmt.Sprintf("%s\nFROM: %s\n  TO: %s", msg, result.source, result.target)
 }
 
 func formatSFTPTransferSuccess(result sftpTransferResult) string {
+	status := "SFTP transfer complete"
 	if result.direction == "" {
-		return "SFTP transfer complete"
+		return status
 	}
-	return fmt.Sprintf("SFTP %s complete\nFROM: %s\n  TO: %s", result.direction, result.source, result.target)
+	status = fmt.Sprintf("SFTP %s complete", result.direction)
+	if skipped := formatSkippedReport(result.report); skipped != "" {
+		status += "\n" + skipped
+	}
+	return fmt.Sprintf("%s\nFROM: %s\n  TO: %s", status, result.source, result.target)
+}
+
+func formatSkippedReport(report sftp.TransferReport) string {
+	if !report.HasSkipped() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Skipped %d item(s)", report.SkippedCount))
+	for _, item := range report.Skipped {
+		b.WriteString("\n- ")
+		b.WriteString(item.Path)
+		b.WriteString(": ")
+		b.WriteString(item.Reason)
+	}
+	if remaining := report.SkippedCount - len(report.Skipped); remaining > 0 {
+		b.WriteString(fmt.Sprintf("\n- ... %d more", remaining))
+	}
+	return b.String()
 }

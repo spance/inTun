@@ -779,6 +779,63 @@ func TestFormatSFTPTransferMessages(t *testing.T) {
 	if !strings.Contains(got, "SFTP upload complete") || !strings.Contains(got, "FROM: /local/file.txt") || !strings.Contains(got, "TO: /remote/file.txt") {
 		t.Fatalf("success message = %q", got)
 	}
+
+	result.report = sftp.TransferReport{
+		SkippedCount: 2,
+		Skipped: []sftp.SkippedItem{
+			{Path: "/remote/link", Reason: "symbolic link"},
+			{Path: "/remote/private", Reason: "permission denied"},
+		},
+	}
+	got = formatSFTPTransferSuccess(result)
+	if !strings.Contains(got, "Skipped 2 item(s)") || !strings.Contains(got, "/remote/link: symbolic link") {
+		t.Fatalf("success message should include skipped summary: %q", got)
+	}
+}
+
+func TestFormatDirectorySyncConfirmMessageShowsDirection(t *testing.T) {
+	upload := formatDirectorySyncConfirmMessage(0, "/local/project", "/remote/project", sftp.OverwriteReport{})
+	if !strings.Contains(upload, "LOCAL -> REMOTE  UPLOAD") ||
+		!strings.Contains(upload, "SOURCE: LOCAL  /local/project") ||
+		!strings.Contains(upload, "DESTINATION: REMOTE  /remote/project") {
+		t.Fatalf("upload confirm message is unclear: %q", upload)
+	}
+
+	downloadReport := sftp.OverwriteReport{
+		Count: 1,
+		Items: []sftp.ExistingItem{{Path: "/local/project/existing.txt", Kind: "file"}},
+	}
+	download := formatDirectorySyncConfirmMessage(1, "/remote/project", "/local/project", downloadReport)
+	if !strings.Contains(download, "REMOTE -> LOCAL  DOWNLOAD") ||
+		!strings.Contains(download, "OVERWRITE: 1 existing target item(s)") ||
+		!strings.Contains(download, "/local/project/existing.txt: file") ||
+		!strings.Contains(download, "SOURCE: REMOTE  /remote/project") ||
+		!strings.Contains(download, "DESTINATION: LOCAL  /local/project") {
+		t.Fatalf("download confirm message is unclear: %q", download)
+	}
+
+	body, fields := modalMessageParts(download)
+	if len(body) < 3 || body[0] != "REMOTE -> LOCAL  DOWNLOAD" || !strings.Contains(body[1], "OVERWRITE") {
+		t.Fatalf("direction should be the primary modal body, got %#v", body)
+	}
+	if len(fields) != 2 || fields[0].Label != "SOURCE" || fields[1].Label != "DESTINATION" {
+		t.Fatalf("source/destination fields not parsed: %#v", fields)
+	}
+}
+
+func TestFormatFileOverwriteConfirmMessageShowsRisk(t *testing.T) {
+	report := sftp.OverwriteReport{
+		Count: 1,
+		Items: []sftp.ExistingItem{{Path: "/remote/file.txt", Kind: "file"}},
+	}
+	msg := formatFileOverwriteConfirmMessage(0, "/local/file.txt", "/remote/file.txt", report)
+	if !strings.Contains(msg, "LOCAL -> REMOTE  UPLOAD") ||
+		!strings.Contains(msg, "OVERWRITE FILE") ||
+		!strings.Contains(msg, "/remote/file.txt: file") ||
+		!strings.Contains(msg, "SOURCE: LOCAL  /local/file.txt") ||
+		!strings.Contains(msg, "DESTINATION: REMOTE  /remote/file.txt") {
+		t.Fatalf("file overwrite message is unclear: %q", msg)
+	}
 }
 
 func TestSFTPScrollStateTracksCursor(t *testing.T) {

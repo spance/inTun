@@ -46,6 +46,95 @@ type ProgressSnapshot struct {
 	Active    bool
 }
 
+type SkippedItem struct {
+	Path   string
+	Reason string
+}
+
+const maxSkippedDetails = 5
+
+type TransferReport struct {
+	Skipped      []SkippedItem
+	SkippedCount int
+}
+
+type ExistingItem struct {
+	Path string
+	Kind string
+}
+
+const maxExistingDetails = 5
+
+type OverwriteReport struct {
+	Items []ExistingItem
+	Count int
+}
+
+func (r *TransferReport) addSkipped(path string, reason interface{}) {
+	r.SkippedCount++
+	if len(r.Skipped) >= maxSkippedDetails {
+		return
+	}
+
+	reasonText := fmt.Sprint(reason)
+	if reasonText == "" {
+		reasonText = "skipped"
+	}
+	r.Skipped = append(r.Skipped, SkippedItem{
+		Path:   path,
+		Reason: reasonText,
+	})
+}
+
+func (r TransferReport) HasSkipped() bool {
+	return r.SkippedCount > 0
+}
+
+func (r *OverwriteReport) addExisting(path, kind string) {
+	r.Count++
+	if len(r.Items) >= maxExistingDetails {
+		return
+	}
+	if kind == "" {
+		kind = "existing target"
+	}
+	r.Items = append(r.Items, ExistingItem{
+		Path: path,
+		Kind: kind,
+	})
+}
+
+func (r OverwriteReport) HasOverwrites() bool {
+	return r.Count > 0
+}
+
+func (r *OverwriteReport) AddExisting(path, kind string) {
+	r.addExisting(path, kind)
+}
+
+func FileEntryKind(entry FileEntry) string {
+	if entry.IsDir {
+		return "directory"
+	}
+	if entry.Mode.IsRegular() {
+		return "file"
+	}
+	switch {
+	case entry.Mode&fs.ModeSymlink != 0:
+		return "symbolic link"
+	case entry.Mode&fs.ModeSocket != 0:
+		return "socket"
+	case entry.Mode&fs.ModeDevice != 0:
+		return "device file"
+	case entry.Mode&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case entry.Mode&fs.ModeIrregular != 0:
+		return "irregular file"
+	default:
+		return "existing target"
+	}
+}
+
 func NewProgressInfo(file string, total int64) *ProgressInfo {
 	return &ProgressInfo{
 		File:   file,
@@ -172,6 +261,47 @@ func ReadLocalDir(path string) ([]FileEntry, error) {
 	}
 	sortEntries(entries)
 	return entries, nil
+}
+
+func LocalPathInfo(path string) (FileEntry, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return FileEntry{}, false, nil
+	}
+	if err != nil {
+		return FileEntry{}, false, err
+	}
+	return fileEntryFromInfo(info), true, nil
+}
+
+func (s *Client) RemotePathInfo(ctx context.Context, path string) (FileEntry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := checkCanceled(ctx); err != nil {
+		return FileEntry{}, false, err
+	}
+	info, err := s.client.Lstat(path)
+	if os.IsNotExist(err) {
+		return FileEntry{}, false, nil
+	}
+	if err != nil {
+		return FileEntry{}, false, err
+	}
+	return fileEntryFromInfo(info), true, nil
+}
+
+func fileEntryFromInfo(info os.FileInfo) FileEntry {
+	if info == nil {
+		return FileEntry{}
+	}
+	return FileEntry{
+		Name:    info.Name(),
+		Size:    info.Size(),
+		Mode:    info.Mode(),
+		ModTime: info.ModTime(),
+		IsDir:   info.IsDir(),
+	}
 }
 
 func sortEntries(entries []FileEntry) {
@@ -368,74 +498,249 @@ func isBinary(s string) bool {
 	return false
 }
 
-func (s *Client) DownloadDir(ctx context.Context, sourceRemoteDir, localDir string, progress func(done, total int64, file string)) error {
+func (s *Client) DownloadDir(ctx context.Context, sourceRemoteDir, localDir string, progress func(done, total int64, file string)) (TransferReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var report TransferReport
+	if err := checkCanceled(ctx); err != nil {
+		return report, err
+	}
+
+	totalSize, err := s.remoteRegularFileTotal(ctx, sourceRemoteDir, map[string]struct{}{})
+	if err != nil {
+		return report, err
+	}
+
+	var done int64
+	err = s.downloadRemoteEntry(ctx, sourceRemoteDir, sourceRemoteDir, localDir, map[string]struct{}{}, &report, &done, totalSize, progress)
+	if err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
+func (s *Client) UploadDirOverwriteReport(ctx context.Context, localDir, targetRemoteDir string) (OverwriteReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var report OverwriteReport
+	if err := checkCanceled(ctx); err != nil {
+		return report, err
+	}
+	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if cancelErr := checkCanceled(ctx); cancelErr != nil {
+			return cancelErr
+		}
+		if err != nil {
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isSyncableRegularFile(info) {
+			return nil
+		}
+		rel, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return nil
+		}
+		remotePath := JoinRemotePath(targetRemoteDir, rel)
+		kind, exists, err := s.remoteExistingKind(ctx, remotePath)
+		if err != nil {
+			report.addExisting(remotePath, "unable to verify: "+err.Error())
+			return nil
+		}
+		if exists {
+			report.addExisting(remotePath, kind)
+		}
+		return nil
+	})
+	return report, err
+}
+
+func (s *Client) DownloadDirOverwriteReport(ctx context.Context, sourceRemoteDir, localDir string) (OverwriteReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var report OverwriteReport
+	if err := checkCanceled(ctx); err != nil {
+		return report, err
+	}
+	err := s.downloadDirOverwriteReport(ctx, sourceRemoteDir, sourceRemoteDir, localDir, map[string]struct{}{}, &report)
+	return report, err
+}
+
+func (s *Client) downloadDirOverwriteReport(ctx context.Context, rootRemoteDir, remotePath, localRoot string, seen map[string]struct{}, report *OverwriteReport) error {
 	if err := checkCanceled(ctx); err != nil {
 		return err
 	}
-
-	var totalSize int64
-	walker := s.client.Walk(sourceRemoteDir)
-	for walker.Step() {
-		if err := checkCanceled(ctx); err != nil {
-			return err
-		}
-		if err := walker.Err(); err != nil {
-			return err
-		}
-		stat := walker.Stat()
-		if stat != nil && !stat.IsDir() {
-			totalSize += stat.Size()
-		}
+	info, err := s.client.Lstat(remotePath)
+	if err != nil {
+		return nil
 	}
-
-	walker = s.client.Walk(sourceRemoteDir)
-	var done int64
-	for walker.Step() {
-		if err := checkCanceled(ctx); err != nil {
-			return err
+	if info.IsDir() {
+		key := pathpkg.Clean(remotePath)
+		if _, ok := seen[key]; ok {
+			return nil
 		}
-		if err := walker.Err(); err != nil {
-			return err
-		}
-		path := walker.Path()
-		stat := walker.Stat()
-		if stat == nil {
-			continue
-		}
-
-		rel, err := RemoteRel(sourceRemoteDir, path)
+		seen[key] = struct{}{}
+		entries, err := s.client.ReadDirContext(ctx, remotePath)
 		if err != nil {
-			return err
+			return nil
 		}
-		localPath := filepath.Join(localDir, rel)
-
-		if stat.IsDir() {
-			if err := os.MkdirAll(localPath, 0755); err != nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "." || name == ".." {
+				continue
+			}
+			if err := s.downloadDirOverwriteReport(ctx, rootRemoteDir, JoinRemotePath(remotePath, name), localRoot, seen, report); err != nil {
 				return err
 			}
-			continue
 		}
-
-		if err := s.copyRemoteToLocal(ctx, path, localPath); err != nil {
-			return err
-		}
-		done += stat.Size()
-		if progress != nil {
-			progress(done, totalSize, RemoteBase(path))
-		}
+		return nil
+	}
+	if !isSyncableRegularFile(info) {
+		return nil
+	}
+	rel, err := RemoteRel(rootRemoteDir, remotePath)
+	if err != nil {
+		return nil
+	}
+	localPath := filepath.Join(localRoot, rel)
+	kind, exists, err := localExistingKind(localPath)
+	if err != nil {
+		report.addExisting(localPath, "unable to verify: "+err.Error())
+		return nil
+	}
+	if exists {
+		report.addExisting(localPath, kind)
 	}
 	return nil
 }
 
-func (s *Client) UploadDir(ctx context.Context, localDir, targetRemoteDir string, progress func(done, total int64, file string)) error {
+func (s *Client) remoteExistingKind(ctx context.Context, path string) (string, bool, error) {
+	if err := checkCanceled(ctx); err != nil {
+		return "", false, err
+	}
+	info, err := s.client.Lstat(path)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return existingItemKind(info), true, nil
+}
+
+func (s *Client) remoteRegularFileTotal(ctx context.Context, remotePath string, seen map[string]struct{}) (int64, error) {
+	if err := checkCanceled(ctx); err != nil {
+		return 0, err
+	}
+	info, err := s.client.Lstat(remotePath)
+	if err != nil {
+		return 0, nil
+	}
+	if info.IsDir() {
+		key := pathpkg.Clean(remotePath)
+		if _, ok := seen[key]; ok {
+			return 0, nil
+		}
+		seen[key] = struct{}{}
+		entries, err := s.client.ReadDirContext(ctx, remotePath)
+		if err != nil {
+			return 0, nil
+		}
+		var total int64
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "." || name == ".." {
+				continue
+			}
+			childTotal, err := s.remoteRegularFileTotal(ctx, JoinRemotePath(remotePath, name), seen)
+			if err != nil {
+				return 0, err
+			}
+			total += childTotal
+		}
+		return total, nil
+	}
+	if !isSyncableRegularFile(info) {
+		return 0, nil
+	}
+	return info.Size(), nil
+}
+
+func (s *Client) downloadRemoteEntry(ctx context.Context, rootRemoteDir, remotePath, localRoot string, seen map[string]struct{}, report *TransferReport, done *int64, total int64, progress func(done, total int64, file string)) error {
+	if err := checkCanceled(ctx); err != nil {
+		return err
+	}
+	info, err := s.client.Lstat(remotePath)
+	if err != nil {
+		report.addSkipped(remotePath, err)
+		return nil
+	}
+
+	rel, err := RemoteRel(rootRemoteDir, remotePath)
+	if err != nil {
+		report.addSkipped(remotePath, err)
+		return nil
+	}
+	localPath := filepath.Join(localRoot, rel)
+
+	if info.IsDir() {
+		key := pathpkg.Clean(remotePath)
+		if _, ok := seen[key]; ok {
+			report.addSkipped(remotePath, "directory already visited")
+			return nil
+		}
+		seen[key] = struct{}{}
+		if err := os.MkdirAll(localPath, 0755); err != nil {
+			report.addSkipped(remotePath, fmt.Sprintf("create local directory %s: %v", localPath, err))
+			return nil
+		}
+		entries, err := s.client.ReadDirContext(ctx, remotePath)
+		if err != nil {
+			report.addSkipped(remotePath, err)
+			return nil
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "." || name == ".." {
+				continue
+			}
+			if err := s.downloadRemoteEntry(ctx, rootRemoteDir, JoinRemotePath(remotePath, name), localRoot, seen, report, done, total, progress); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if !isSyncableRegularFile(info) {
+		report.addSkipped(remotePath, nonRegularFileReason(info))
+		return nil
+	}
+	if err := s.copyRemoteToLocal(ctx, remotePath, localPath); err != nil {
+		if ctxErr := checkCanceled(ctx); ctxErr != nil {
+			return ctxErr
+		}
+		report.addSkipped(remotePath, fmt.Sprintf("copy to %s: %v", localPath, err))
+		return nil
+	}
+	*done += info.Size()
+	if progress != nil {
+		progress(*done, total, RemoteBase(remotePath))
+	}
+	return nil
+}
+
+func (s *Client) UploadDir(ctx context.Context, localDir, targetRemoteDir string, progress func(done, total int64, file string)) (TransferReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var report TransferReport
 	if err := checkCanceled(ctx); err != nil {
-		return err
+		return report, err
 	}
 
 	var totalSize int64
@@ -444,19 +749,23 @@ func (s *Client) UploadDir(ctx context.Context, localDir, targetRemoteDir string
 			return cancelErr
 		}
 		if err != nil {
-			return err
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		if info.IsDir() {
+		if !isSyncableRegularFile(info) {
 			return nil
 		}
 		totalSize += info.Size()
 		return nil
 	}); err != nil {
-		return err
+		return report, err
 	}
 
 	if err := s.client.MkdirAll(targetRemoteDir); err != nil {
-		return err
+		report.addSkipped(targetRemoteDir, fmt.Sprintf("create remote directory: %v", err))
+		return report, nil
 	}
 
 	var done int64
@@ -465,21 +774,41 @@ func (s *Client) UploadDir(ctx context.Context, localDir, targetRemoteDir string
 			return cancelErr
 		}
 		if err != nil {
-			return err
+			report.addSkipped(path, err)
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		rel, err := filepath.Rel(localDir, path)
 		if err != nil {
-			return err
+			report.addSkipped(path, err)
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		remotePath := JoinRemotePath(targetRemoteDir, rel)
 
 		if info.IsDir() {
-			return s.client.MkdirAll(remotePath)
+			if err := s.client.MkdirAll(remotePath); err != nil {
+				report.addSkipped(path, fmt.Sprintf("create remote directory %s: %v", remotePath, err))
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isSyncableRegularFile(info) {
+			report.addSkipped(path, nonRegularFileReason(info))
+			return nil
 		}
 
 		if err := s.copyLocalToRemote(ctx, path, remotePath); err != nil {
-			return err
+			if ctxErr := checkCanceled(ctx); ctxErr != nil {
+				return ctxErr
+			}
+			report.addSkipped(path, fmt.Sprintf("copy to %s: %v", remotePath, err))
+			return nil
 		}
 		done += info.Size()
 		if progress != nil {
@@ -487,7 +816,58 @@ func (s *Client) UploadDir(ctx context.Context, localDir, targetRemoteDir string
 		}
 		return nil
 	})
-	return err
+	return report, err
+}
+
+func isSyncableRegularFile(info os.FileInfo) bool {
+	if info == nil || info.IsDir() {
+		return false
+	}
+	return info.Mode().IsRegular()
+}
+
+func nonRegularFileReason(info os.FileInfo) string {
+	if info == nil {
+		return "missing file info"
+	}
+	mode := info.Mode()
+	switch {
+	case info.IsDir():
+		return "directory"
+	case mode&os.ModeSymlink != 0:
+		return "symbolic link"
+	case mode&os.ModeSocket != 0:
+		return "socket"
+	case mode&os.ModeDevice != 0:
+		return "device file"
+	case mode&os.ModeNamedPipe != 0:
+		return "named pipe"
+	case mode&os.ModeIrregular != 0:
+		return "irregular file"
+	default:
+		return fmt.Sprintf("non-regular file (%s)", mode.Type())
+	}
+}
+
+func localExistingKind(path string) (string, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return existingItemKind(info), true, nil
+}
+
+func existingItemKind(info os.FileInfo) string {
+	if info == nil {
+		return "existing target"
+	}
+	if info.Mode().IsRegular() {
+		return "file"
+	}
+	return nonRegularFileReason(info)
 }
 
 func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath string) error {
@@ -496,24 +876,27 @@ func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath st
 	}
 	r, err := s.client.Open(remotePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open remote file: %w", err)
 	}
 	defer r.Close()
 	stopWatchingRemote := closeOnCancel(ctx, r)
 	defer stopWatchingRemote()
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-		return err
+		return fmt.Errorf("create local directory: %w", err)
 	}
 	w, err := os.Create(localPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("create local file: %w", err)
 	}
 	defer w.Close()
 	stopWatchingLocal := closeOnCancel(ctx, w)
 	defer stopWatchingLocal()
 
-	return copyWithContext(ctx, r, w, nil)
+	if err := copyWithContext(ctx, r, w, nil); err != nil {
+		return fmt.Errorf("copy file data: %w", err)
+	}
+	return nil
 }
 
 func (s *Client) copyLocalToRemote(ctx context.Context, localPath, remotePath string) error {
@@ -522,24 +905,27 @@ func (s *Client) copyLocalToRemote(ctx context.Context, localPath, remotePath st
 	}
 	r, err := os.Open(localPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open local file: %w", err)
 	}
 	defer r.Close()
 	stopWatchingLocal := closeOnCancel(ctx, r)
 	defer stopWatchingLocal()
 
 	if err := s.client.MkdirAll(RemoteDir(remotePath)); err != nil {
-		return err
+		return fmt.Errorf("create remote directory: %w", err)
 	}
 	w, err := s.client.Create(remotePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("create remote file: %w", err)
 	}
 	defer w.Close()
 	stopWatchingRemote := closeOnCancel(ctx, w)
 	defer stopWatchingRemote()
 
-	return copyWithContext(ctx, r, w, nil)
+	if err := copyWithContext(ctx, r, w, nil); err != nil {
+		return fmt.Errorf("copy file data: %w", err)
+	}
+	return nil
 }
 
 func copyWithContext(ctx context.Context, r io.Reader, w io.Writer, progress func(int64)) error {

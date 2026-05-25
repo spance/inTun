@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestReadLocalDir(t *testing.T) {
@@ -219,6 +221,96 @@ func TestCheckCanceled(t *testing.T) {
 	}
 	if err := checkCanceled(context.Background()); err != nil {
 		t.Fatalf("uncancelled context returned %v", err)
+	}
+}
+
+type modeInfo struct {
+	mode fs.FileMode
+	dir  bool
+}
+
+func (m modeInfo) Name() string       { return "entry" }
+func (m modeInfo) Size() int64        { return 1 }
+func (m modeInfo) Mode() fs.FileMode  { return m.mode }
+func (m modeInfo) ModTime() time.Time { return time.Time{} }
+func (m modeInfo) IsDir() bool        { return m.dir }
+func (m modeInfo) Sys() interface{}   { return nil }
+
+func TestIsSyncableRegularFile(t *testing.T) {
+	if !isSyncableRegularFile(modeInfo{mode: 0644}) {
+		t.Fatal("regular files should be syncable")
+	}
+	if isSyncableRegularFile(modeInfo{mode: os.ModeSymlink}) {
+		t.Fatal("symlinks should be skipped by recursive sync")
+	}
+	if isSyncableRegularFile(modeInfo{mode: os.ModeSocket}) {
+		t.Fatal("sockets should be skipped by recursive sync")
+	}
+	if isSyncableRegularFile(modeInfo{mode: os.ModeDir, dir: true}) {
+		t.Fatal("directories are handled separately")
+	}
+	if isSyncableRegularFile(nil) {
+		t.Fatal("nil file info should not be syncable")
+	}
+	if got := nonRegularFileReason(modeInfo{mode: os.ModeSymlink}); got != "symbolic link" {
+		t.Fatalf("symlink skip reason = %q", got)
+	}
+}
+
+func TestTransferReportLimitsSkippedDetails(t *testing.T) {
+	var report TransferReport
+	for i := 0; i < 7; i++ {
+		report.addSkipped("file", "permission denied")
+	}
+
+	if report.SkippedCount != 7 {
+		t.Fatalf("SkippedCount = %d, want 7", report.SkippedCount)
+	}
+	if len(report.Skipped) != maxSkippedDetails {
+		t.Fatalf("stored skipped details = %d, want %d", len(report.Skipped), maxSkippedDetails)
+	}
+	if !report.HasSkipped() {
+		t.Fatal("report should indicate skipped items")
+	}
+}
+
+func TestOverwriteReportLimitsExistingDetails(t *testing.T) {
+	var report OverwriteReport
+	for i := 0; i < 7; i++ {
+		report.AddExisting("file", "file")
+	}
+
+	if report.Count != 7 {
+		t.Fatalf("Count = %d, want 7", report.Count)
+	}
+	if len(report.Items) != maxExistingDetails {
+		t.Fatalf("stored existing details = %d, want %d", len(report.Items), maxExistingDetails)
+	}
+	if !report.HasOverwrites() {
+		t.Fatal("report should indicate overwrite risk")
+	}
+}
+
+func TestLocalPathInfoDetectsExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "file.txt")
+	if err := os.WriteFile(path, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, exists, err := LocalPathInfo(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || FileEntryKind(entry) != "file" {
+		t.Fatalf("LocalPathInfo = %#v, %v, want existing file", entry, exists)
+	}
+	_, exists, err = LocalPathInfo(filepath.Join(tmpDir, "missing.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("missing path should not exist")
 	}
 }
 
