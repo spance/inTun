@@ -838,6 +838,35 @@ func TestFormatFileOverwriteConfirmMessageShowsRisk(t *testing.T) {
 	}
 }
 
+func TestValidateSingleSyncSourceRejectsLocalSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target.txt")
+	if err := os.WriteFile(target, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmpDir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	m := newTestModel(nil)
+	m.sftpLocalDir = tmpDir
+	pending := sftpPendingSync{
+		focus:  0,
+		source: link,
+		target: "/remote/link.txt",
+		name:   "link.txt",
+		size:   1,
+	}
+	got, ok := m.validateSingleSyncSource(pending)
+	if ok {
+		t.Fatal("local symlink should not be accepted for single-file sync")
+	}
+	if !strings.Contains(got.statusMsg, "symbolic link") {
+		t.Fatalf("statusMsg = %q, want symbolic link skip reason", got.statusMsg)
+	}
+}
+
 func TestSFTPScrollStateTracksCursor(t *testing.T) {
 	m := newTestModel(nil)
 	m.screen = ScreenSFTP

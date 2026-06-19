@@ -350,6 +350,10 @@ func (m Model) sftpStartSync() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) sftpStartSingleSync(pending sftpPendingSync) (tea.Model, tea.Cmd) {
+	next, ok := m.validateSingleSyncSource(pending)
+	if !ok {
+		return next, nil
+	}
 	report, err := m.singleSyncOverwriteReport(pending)
 	if err != nil {
 		m.setStatusMsg(fmt.Sprintf("Cannot check overwrite risk: %v", err))
@@ -362,6 +366,32 @@ func (m Model) sftpStartSingleSync(pending sftpPendingSync) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	return m.sftpDoSingleSync(pending)
+}
+
+func (m Model) validateSingleSyncSource(pending sftpPendingSync) (Model, bool) {
+	var (
+		entry  sftp.FileEntry
+		exists bool
+		err    error
+	)
+	if pending.focus == 0 {
+		entry, exists, err = sftp.LocalPathInfo(pending.source)
+	} else {
+		entry, exists, err = m.sftpClient.RemotePathInfo(m.sftpContext(), pending.source)
+	}
+	if err != nil {
+		m.setStatusMsg(fmt.Sprintf("Cannot inspect source: %v", err))
+		return m, false
+	}
+	if !exists {
+		m.setStatusMsg("Source no longer exists")
+		return m, false
+	}
+	if !entry.Mode.IsRegular() {
+		m.setStatusMsg(fmt.Sprintf("Skipped non-regular file: %s", sftp.FileEntryKind(entry)))
+		return m, false
+	}
+	return m, true
 }
 
 func (m Model) singleSyncOverwriteReport(pending sftpPendingSync) (sftp.OverwriteReport, error) {
@@ -393,6 +423,10 @@ func (m Model) sftpDoSingleSync(pending sftpPendingSync) (tea.Model, tea.Cmd) {
 	if pending.source == "" || pending.target == "" {
 		m.setStatusMsg("No file selected")
 		return m, nil
+	}
+	next, ok := m.validateSingleSyncSource(pending)
+	if !ok {
+		return next, nil
 	}
 
 	m.sftpTransferring = true

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -311,6 +312,56 @@ func TestLocalPathInfoDetectsExistingFile(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("missing path should not exist")
+	}
+}
+
+func TestLocalDirectoryTargetConflictDetectsNonDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	fileTarget := filepath.Join(tmpDir, "target")
+	if err := os.WriteFile(fileTarget, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var report OverwriteReport
+	addLocalDirectoryTargetConflict(fileTarget, &report)
+	if report.Count != 1 || len(report.Items) != 1 || report.Items[0].Kind != "file" {
+		t.Fatalf("file target conflict report = %#v, want one file conflict", report)
+	}
+
+	report = OverwriteReport{}
+	dirTarget := filepath.Join(tmpDir, "dir")
+	if err := os.Mkdir(dirTarget, 0755); err != nil {
+		t.Fatal(err)
+	}
+	addLocalDirectoryTargetConflict(dirTarget, &report)
+	if report.HasOverwrites() {
+		t.Fatalf("directory target should be allowed, got %#v", report)
+	}
+
+	report = OverwriteReport{}
+	linkTarget := filepath.Join(tmpDir, "link")
+	if err := os.Symlink(dirTarget, linkTarget); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	addLocalDirectoryTargetConflict(linkTarget, &report)
+	if report.Count != 1 || report.Items[0].Kind != "symbolic link" {
+		t.Fatalf("symlink target conflict report = %#v, want symbolic link conflict", report)
+	}
+}
+
+func TestAllowLocalDirectoryTargetSkipsNonDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	fileTarget := filepath.Join(tmpDir, "target")
+	if err := os.WriteFile(fileTarget, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var report TransferReport
+	if allowLocalDirectoryTarget(fileTarget, &report) {
+		t.Fatal("file target should not be accepted as a directory sync destination")
+	}
+	if report.SkippedCount != 1 || !strings.Contains(report.Skipped[0].Reason, "target exists as file") {
+		t.Fatalf("skip report = %#v, want target exists as file", report)
 	}
 }
 
