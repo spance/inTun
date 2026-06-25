@@ -28,6 +28,8 @@ const (
 )
 
 func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	keys := defaultSFTPKeyMap
+
 	if m.sftpRenaming {
 		switch msg.String() {
 		case "enter":
@@ -48,14 +50,14 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.sftpOverwriteConfirm {
-		switch msg.String() {
-		case "enter":
+		switch {
+		case matchKey(msg, keys.Confirm):
 			pending := m.sftpPendingSync
 			m.sftpOverwriteConfirm = false
 			m.sftpOverwriteConfirmMsg = ""
 			m.sftpPendingSync = sftpPendingSync{}
 			return m.sftpDoSingleSync(pending)
-		case "esc":
+		case matchKey(msg, keys.Cancel):
 			m.sftpOverwriteConfirm = false
 			m.sftpOverwriteConfirmMsg = ""
 			m.sftpPendingSync = sftpPendingSync{}
@@ -64,12 +66,12 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.sftpSyncConfirm {
-		switch msg.String() {
-		case "enter":
+		switch {
+		case matchKey(msg, keys.Confirm):
 			m.sftpSyncConfirm = false
 			m.sftpSyncConfirmMsg = ""
 			return m.sftpDoRecursive()
-		case "esc":
+		case matchKey(msg, keys.Cancel):
 			m.sftpSyncConfirm = false
 			m.sftpSyncConfirmMsg = ""
 		}
@@ -77,16 +79,16 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.sftpPreviewing {
-		switch msg.String() {
-		case "esc", "q":
+		switch {
+		case matchKey(msg, keys.Close):
 			m.sftpPreviewing = false
 			m.sftpPreview = ""
 		}
 		return m, nil
 	}
 
-	switch msg.String() {
-	case "q", "esc":
+	switch {
+	case matchKey(msg, keys.Close):
 		if m.sftpCancel != nil {
 			m.sftpCancel()
 			m.sftpCancel = nil
@@ -102,29 +104,29 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sftpPendingSync = sftpPendingSync{}
 		m.screen = ScreenMain
 		return m, nil
-	case "tab":
+	case matchKey(msg, keys.Switch):
 		if m.sftpFocus == 0 {
 			m.sftpFocus = 1
 		} else {
 			m.sftpFocus = 0
 		}
-	case "up", "k":
+	case matchKey(msg, keys.Up):
 		if m.sftpCursor[m.sftpFocus] > 0 {
 			m.sftpCursor[m.sftpFocus]--
 		}
-	case "down", "j":
+	case matchKey(msg, keys.Down):
 		files := m.currentSFTPFiles()
 		if m.sftpCursor[m.sftpFocus] < len(files) {
 			m.sftpCursor[m.sftpFocus]++
 		}
-	case "pgup":
+	case matchKey(msg, keys.PageUp):
 		visibleHeight := m.sftpListVisibleItems()
 		cur := &m.sftpCursor[m.sftpFocus]
 		*cur -= visibleHeight
 		if *cur < 0 {
 			*cur = 0
 		}
-	case "pgdown":
+	case matchKey(msg, keys.PageDown):
 		files := m.currentSFTPFiles()
 		visibleHeight := m.sftpListVisibleItems()
 		maxCur := len(files)
@@ -133,27 +135,27 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if *cur > maxCur {
 			*cur = maxCur
 		}
-	case "enter":
+	case matchKey(msg, keys.Open):
 		return m.sftpEnterDir()
-	case "s":
+	case matchKey(msg, keys.Sync):
 		if m.sftpTransferring {
 			m.setStatusMsg("Wait for transfer to complete")
 			return m, nil
 		}
 		return m.sftpStartSync()
-	case "r":
+	case matchKey(msg, keys.SyncDir):
 		if m.sftpTransferring {
 			m.setStatusMsg("Wait for transfer to complete")
 			return m, nil
 		}
 		return m.sftpStartRecursiveConfirm()
-	case "v":
+	case matchKey(msg, keys.Preview):
 		if m.sftpTransferring {
 			m.setStatusMsg("Wait for transfer to complete")
 			return m, nil
 		}
 		return m.sftpPreviewFile()
-	case "n":
+	case matchKey(msg, keys.Rename):
 		if !m.sftpTransferring {
 			files := m.currentSFTPFiles()
 			cursor := m.sftpCursor[m.sftpFocus]

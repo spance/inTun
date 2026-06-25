@@ -1,19 +1,16 @@
 package platform
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	sftp "github.com/pkg/sftp"
+	"github.com/spance/intun/internal/logging"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -105,7 +102,7 @@ func (c *SSHConnection) sendKeepalive() {
 
 			_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
 			if err != nil {
-				log.Printf("[SSH] Keepalive failed: %v", err)
+				sshLog.Warn("keepalive failed", slog.Any("error", err))
 				c.setError("SSH_KEEPALIVE_FAILED: " + err.Error())
 				return
 			}
@@ -156,19 +153,7 @@ func (c *SSHConnection) NewSFTPClient() (interface{}, error) {
 
 type SSHExecutor struct{}
 
-func init() {
-	logFile := os.Getenv("INTUN_LOG")
-	if logFile != "" {
-		log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
-		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err == nil {
-			log.SetOutput(f)
-			log.Printf("[SSH] Logging to %s", logFile)
-		}
-	} else {
-		log.SetOutput(io.Discard)
-	}
-}
+var sshLog = logging.Default().With("component", "ssh")
 
 func newPlatformExecutor() Executor {
 	return &SSHExecutor{}
@@ -272,380 +257,14 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 	go func() {
 		err := client.Wait()
 		if err != nil {
-			log.Printf("[SSH] Connection closed: %s@%s:%s - %v", cfg.User, cfg.Host, cfg.Port, err)
+			sshLog.Warn("connection closed",
+				"user", cfg.User,
+				"host", cfg.Host,
+				"port", cfg.Port,
+				slog.Any("error", err),
+			)
 			conn.setConnectionLost("SSH_CONNECTION_LOST: " + err.Error())
 		}
 		conn.setExited()
 	}()
-}
-
-func (e *SSHExecutor) getAuthMethods(identityFile string, authCtx *AuthContext, id int, user string, host string) ([]ssh.AuthMethod, error) {
-	var methods []ssh.AuthMethod
-	var errs []string
-
-	if identityFile != "" {
-		path := expandPath(identityFile)
-		key, err := e.loadPrivateKey(path)
-		if err == nil {
-			methods = append(methods, ssh.PublicKeys(key))
-		} else {
-			errs = append(errs, fmt.Sprintf("%s: %v", path, err))
-		}
-	}
-
-	home, err := os.UserHomeDir()
-	if err == nil {
-		for _, keyFile := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
-			path := filepath.Join(home, ".ssh", keyFile)
-			key, err := e.loadPrivateKey(path)
-			if err == nil {
-				methods = append(methods, ssh.PublicKeys(key))
-			} else {
-				errs = append(errs, fmt.Sprintf("%s: %v", path, err))
-			}
-		}
-	}
-
-	if authCtx != nil && authCtx.RequestChan != nil {
-		methods = append(methods, ssh.PasswordCallback(func() (string, error) {
-			return e.promptPassword(authCtx, id, user, host)
-		}))
-		methods = append(methods, ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
-			return e.handleKeyboardInteractive(authCtx, id, user, host, questions, echos)
-		}))
-	}
-
-	if len(methods) == 0 {
-		return nil, fmt.Errorf("no auth methods: %s", strings.Join(errs, "; "))
-	}
-
-	return methods, nil
-}
-
-func (e *SSHExecutor) promptPassword(authCtx *AuthContext, id int, user string, host string) (string, error) {
-	timeout := authCtx.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-
-	for retry := 0; retry < 3; retry++ {
-		req := AuthRequest{
-			ID:         id,
-			Type:       AuthRequestPassword,
-			Host:       user + "@" + host,
-			RetryCount: retry,
-			Response:   make(chan AuthResponse, 1),
-		}
-
-		select {
-		case authCtx.RequestChan <- req:
-		case <-authCtx.Cancel.Done():
-			return "", errors.New("cancelled")
-		case <-time.After(timeout):
-			return "", errors.New("auth timeout")
-		}
-
-		select {
-		case resp := <-req.Response:
-			if !resp.Accept || resp.Password == "" {
-				return "", errors.New("password cancelled")
-			}
-			return resp.Password, nil
-		case <-authCtx.Cancel.Done():
-			return "", errors.New("cancelled")
-		case <-time.After(timeout):
-			return "", errors.New("auth timeout")
-		}
-	}
-	return "", errors.New("max password attempts")
-}
-
-func (e *SSHExecutor) handleKeyboardInteractive(authCtx *AuthContext, id int, user string, host string, questions []string, echos []bool) ([]string, error) {
-	timeout := authCtx.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-
-	answers := make([]string, len(questions))
-
-	for retry := 0; retry < 3; retry++ {
-		req := AuthRequest{
-			ID:         id,
-			Type:       AuthRequestPassword,
-			Host:       user + "@" + host,
-			RetryCount: retry,
-			Response:   make(chan AuthResponse, 1),
-		}
-
-		select {
-		case authCtx.RequestChan <- req:
-		case <-authCtx.Cancel.Done():
-			return nil, errors.New("cancelled")
-		case <-time.After(timeout):
-			return nil, errors.New("auth timeout")
-		}
-
-		select {
-		case resp := <-req.Response:
-			if !resp.Accept || resp.Password == "" {
-				return nil, errors.New("password cancelled")
-			}
-			for i := range questions {
-				answers[i] = resp.Password
-			}
-			return answers, nil
-		case <-authCtx.Cancel.Done():
-			return nil, errors.New("cancelled")
-		case <-time.After(timeout):
-			return nil, errors.New("auth timeout")
-		}
-	}
-	return nil, errors.New("max password attempts")
-}
-
-func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePort string) {
-	listenAddr := tcpForwardAddr(localPort)
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Printf("[SSH] Local listen failed on %s: %v", listenAddr, err)
-		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
-		if conn.client != nil {
-			conn.client.Close()
-		}
-		return
-	}
-	conn.addForward(listener)
-	log.Printf("[SSH] Local forward listening on %s -> %s", listenAddr, tcpForwardAddr(remotePort))
-
-	go func() {
-		for {
-			localConn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go conn.handleLocalForward(localConn, remotePort)
-		}
-	}()
-}
-
-func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteAddr string) {
-	listenAddr := tcpForwardAddr(remoteAddr)
-	listener, err := conn.client.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Printf("[SSH] Remote listen failed on %s: %v", listenAddr, err)
-		conn.setError(fmt.Sprintf("REMOTE_LISTEN_FAILED: %v", err))
-		if conn.client != nil {
-			conn.client.Close()
-		}
-		return
-	}
-	conn.addForward(listener)
-	log.Printf("[SSH] Remote forward listening on %s -> %s", listenAddr, tcpForwardAddr(localAddr))
-
-	go func() {
-		for {
-			remoteConn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go conn.handleRemoteForward(remoteConn, localAddr)
-		}
-	}()
-}
-
-func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string) {
-	listenAddr := tcpForwardAddr(localPort)
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Printf("[SSH] Dynamic listen failed on %s: %v", listenAddr, err)
-		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
-		if conn.client != nil {
-			conn.client.Close()
-		}
-		return
-	}
-	conn.addForward(listener)
-	log.Printf("[SSH] Dynamic forward listening on %s", listenAddr)
-
-	go func() {
-		for {
-			localConn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go conn.handleDynamicForward(localConn)
-		}
-	}()
-}
-
-func (e *SSHExecutor) loadPrivateKey(path string) (ssh.Signer, error) {
-	keyBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	key, err := ssh.ParsePrivateKey(keyBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	return key, nil
-}
-
-func expandPath(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
-		return filepath.Join(home, path[2:])
-	}
-	return path
-}
-
-func tcpForwardAddr(addr string) string {
-	if strings.Contains(addr, ":") {
-		return addr
-	}
-	return "127.0.0.1:" + addr
-}
-
-func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string) {
-	defer localConn.Close()
-
-	c.mu.RLock()
-	client := c.client
-	exited := c.exited
-	c.mu.RUnlock()
-
-	if exited || client == nil {
-		return
-	}
-
-	remoteConn, err := client.Dial("tcp", tcpForwardAddr(remotePort))
-	if err != nil {
-		return
-	}
-	defer remoteConn.Close()
-
-	countedRemote := NewCountedConn(remoteConn, &c.totalUpload, &c.totalDownload)
-
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(localConn, countedRemote)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(countedRemote, localConn)
-		done <- struct{}{}
-	}()
-	<-done
-}
-
-func (c *SSHConnection) handleRemoteForward(remoteConn net.Conn, localAddr string) {
-	defer remoteConn.Close()
-
-	localConn, err := net.Dial("tcp", tcpForwardAddr(localAddr))
-	if err != nil {
-		return
-	}
-	defer localConn.Close()
-
-	countedRemote := NewCountedConn(remoteConn, &c.totalUpload, &c.totalDownload)
-
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(localConn, countedRemote)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(countedRemote, localConn)
-		done <- struct{}{}
-	}()
-	<-done
-}
-
-func (c *SSHConnection) handleDynamicForward(localConn net.Conn) {
-	defer localConn.Close()
-
-	buf := make([]byte, 262)
-	n, err := localConn.Read(buf)
-	if err != nil || n < 3 {
-		return
-	}
-
-	if buf[0] != 0x05 {
-		return
-	}
-
-	localConn.Write([]byte{0x05, 0x00})
-
-	buf = make([]byte, 262)
-	n, err = localConn.Read(buf)
-	if err != nil || n < 10 {
-		return
-	}
-
-	socks5ErrReply := []byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-
-	if buf[0] != 0x05 || buf[1] != 0x01 {
-		if buf[0] == 0x05 {
-			localConn.Write(socks5ErrReply)
-		}
-		return
-	}
-
-	var target string
-	switch buf[3] {
-	case 0x01:
-		if n < 10 {
-			localConn.Write(socks5ErrReply)
-			return
-		}
-		target = fmt.Sprintf("%d.%d.%d.%d:%d", buf[4], buf[5], buf[6], buf[7], int(buf[8])<<8|int(buf[9]))
-	case 0x03:
-		hostLen := int(buf[4])
-		if n < 5+hostLen+2 {
-			localConn.Write(socks5ErrReply)
-			return
-		}
-		host := string(buf[5 : 5+hostLen])
-		port := int(buf[5+hostLen])<<8 | int(buf[5+hostLen+1])
-		target = fmt.Sprintf("%s:%d", host, port)
-	default:
-		localConn.Write(socks5ErrReply)
-		return
-	}
-
-	c.mu.RLock()
-	client := c.client
-	exited := c.exited
-	c.mu.RUnlock()
-
-	if exited || client == nil {
-		localConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-
-	remoteConn, err := client.Dial("tcp", target)
-	if err != nil {
-		localConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return
-	}
-	defer remoteConn.Close()
-
-	countedRemote := NewCountedConn(remoteConn, &c.totalUpload, &c.totalDownload)
-
-	localConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(localConn, countedRemote)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(countedRemote, localConn)
-		done <- struct{}{}
-	}()
-	<-done
 }
