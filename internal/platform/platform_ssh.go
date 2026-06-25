@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/crypto/ssh"
 	sftp "github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 type SSHConnection struct {
@@ -121,6 +121,17 @@ func (c *SSHConnection) setExited() {
 
 func (c *SSHConnection) setError(msg string) {
 	c.mu.Lock()
+	c.exited = true
+	c.lastError = msg
+	c.mu.Unlock()
+}
+
+func (c *SSHConnection) setConnectionLost(msg string) {
+	c.mu.Lock()
+	if c.exited || c.lastError != "" {
+		c.mu.Unlock()
+		return
+	}
 	c.exited = true
 	c.lastError = msg
 	c.mu.Unlock()
@@ -262,7 +273,7 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 		err := client.Wait()
 		if err != nil {
 			log.Printf("[SSH] Connection closed: %s@%s:%s - %v", cfg.User, cfg.Host, cfg.Port, err)
-			conn.setError("SSH_CONNECTION_LOST: " + err.Error())
+			conn.setConnectionLost("SSH_CONNECTION_LOST: " + err.Error())
 		}
 		conn.setExited()
 	}()
@@ -396,6 +407,7 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 	listenAddr := tcpForwardAddr(localPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
+		log.Printf("[SSH] Local listen failed on %s: %v", listenAddr, err)
 		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
 		if conn.client != nil {
 			conn.client.Close()
@@ -403,6 +415,7 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 		return
 	}
 	conn.addForward(listener)
+	log.Printf("[SSH] Local forward listening on %s -> %s", listenAddr, tcpForwardAddr(remotePort))
 
 	go func() {
 		for {
@@ -416,8 +429,10 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 }
 
 func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteAddr string) {
-	listener, err := conn.client.Listen("tcp", tcpForwardAddr(remoteAddr))
+	listenAddr := tcpForwardAddr(remoteAddr)
+	listener, err := conn.client.Listen("tcp", listenAddr)
 	if err != nil {
+		log.Printf("[SSH] Remote listen failed on %s: %v", listenAddr, err)
 		conn.setError(fmt.Sprintf("REMOTE_LISTEN_FAILED: %v", err))
 		if conn.client != nil {
 			conn.client.Close()
@@ -425,6 +440,7 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteA
 		return
 	}
 	conn.addForward(listener)
+	log.Printf("[SSH] Remote forward listening on %s -> %s", listenAddr, tcpForwardAddr(localAddr))
 
 	go func() {
 		for {
@@ -441,6 +457,7 @@ func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string)
 	listenAddr := tcpForwardAddr(localPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
+		log.Printf("[SSH] Dynamic listen failed on %s: %v", listenAddr, err)
 		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
 		if conn.client != nil {
 			conn.client.Close()
@@ -448,6 +465,7 @@ func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string)
 		return
 	}
 	conn.addForward(listener)
+	log.Printf("[SSH] Dynamic forward listening on %s", listenAddr)
 
 	go func() {
 		for {

@@ -217,6 +217,24 @@ func TestViewAuthError(t *testing.T) {
 	}
 }
 
+func TestViewConnectionLostShowsDetail(t *testing.T) {
+	m := newTestModelWithTunnel()
+	tun := m.manager.List()[0]
+
+	tun.Status = tunnel.StatusError
+	tun.Error = "SSH_CONNECTION_LOST: EOF"
+
+	output := m.View().Content
+	clean := stripANSI(output)
+
+	if !strings.Contains(clean, "SSH connection lost") {
+		t.Error("View should show connection lost message")
+	}
+	if !strings.Contains(clean, "EOF") {
+		t.Error("View should show connection lost detail")
+	}
+}
+
 func TestViewPortInputScreen(t *testing.T) {
 	m := newTestModelWithTunnel()
 	m.screen = ScreenInputPort

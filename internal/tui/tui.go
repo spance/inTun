@@ -1732,7 +1732,14 @@ func renderTunnelErrorHint(t *tunnel.Tunnel, width int) []string {
 			selectedStyle.Render(fmt.Sprintf("ssh %s@%s -p %s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)),
 		}
 	case strings.Contains(errMsg, "SSH_CONNECTION_LOST"):
-		return []string{dangerStyle.Render("SSH connection lost - press 'r' to reconnect")}
+		detail := strings.TrimSpace(strings.TrimPrefix(errMsg, "SSH_CONNECTION_LOST:"))
+		if detail == "" {
+			return []string{dangerStyle.Render("SSH connection lost - press 'r' to reconnect")}
+		}
+		return []string{
+			dangerStyle.Render("SSH connection lost - press 'r' to reconnect"),
+			mutedStyle.Render(truncate(detail, width)),
+		}
 	default:
 		return []string{dangerStyle.Render("Error: " + truncate(errMsg, width))}
 	}
