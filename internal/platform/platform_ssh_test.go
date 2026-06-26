@@ -244,6 +244,146 @@ func TestDynamicForwardReturnsFailureWithoutSSHClient(t *testing.T) {
 	}
 }
 
+func TestDynamicForwardRejectsUnsupportedCommand(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	client.SetDeadline(time.Now().Add(time.Second))
+
+	done := make(chan struct{})
+	go func() {
+		(&SSHConnection{}).handleDynamicForward(server)
+		close(done)
+	}()
+
+	if _, err := client.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+	greeting := make([]byte, 2)
+	if _, err := io.ReadFull(client, greeting); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write([]byte{0x05, 0x02, 0x00, 0x01, 127, 0, 0, 1, 0, 80}); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] != 0x07 {
+		t.Fatalf("SOCKS reply = %#v, want command-not-supported", reply)
+	}
+	client.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("dynamic forward handler did not exit")
+	}
+}
+
+func TestProxyTCPTransfersBothDirections(t *testing.T) {
+	leftProxy, leftPeer := net.Pipe()
+	rightProxy, rightPeer := net.Pipe()
+	leftPeer.SetDeadline(time.Now().Add(time.Second))
+	rightPeer.SetDeadline(time.Now().Add(time.Second))
+
+	done := make(chan struct{})
+	go func() {
+		proxyTCP(leftProxy, rightProxy)
+		close(done)
+	}()
+
+	if _, err := leftPeer.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(rightPeer, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("right peer read %q, want ping", string(buf))
+	}
+
+	if _, err := rightPeer.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(leftPeer, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("left peer read %q, want pong", string(buf))
+	}
+
+	leftPeer.Close()
+	rightPeer.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("proxyTCP did not exit after peers closed")
+	}
+}
+
+func TestStartLocalAndDynamicForwardListeners(t *testing.T) {
+	exec := &SSHExecutor{}
+
+	localConn := &SSHConnection{}
+	exec.startLocalForward(localConn, "127.0.0.1:0", "80")
+	if got := localConn.Error(); got != "" {
+		t.Fatalf("local forward error = %q, want none", got)
+	}
+	if len(localConn.forwards) != 1 {
+		t.Fatalf("local forward count = %d, want 1 listener", len(localConn.forwards))
+	}
+	if err := localConn.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	dynamicConn := &SSHConnection{}
+	exec.startDynamicForward(dynamicConn, "127.0.0.1:0")
+	if got := dynamicConn.Error(); got != "" {
+		t.Fatalf("dynamic forward error = %q, want none", got)
+	}
+	if len(dynamicConn.forwards) != 1 {
+		t.Fatalf("dynamic forward count = %d, want 1 listener", len(dynamicConn.forwards))
+	}
+	if err := dynamicConn.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartLocalForwardReportsListenFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	conn := &SSHConnection{}
+	(&SSHExecutor{}).startLocalForward(conn, listener.Addr().String(), "80")
+
+	if got := conn.Error(); !strings.Contains(got, "LISTEN_FAILED") {
+		t.Fatalf("local forward error = %q, want LISTEN_FAILED", got)
+	}
+}
+
+func TestSSHExecutorConnectEarlyFailures(t *testing.T) {
+	exec := &SSHExecutor{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, err := exec.Connect(&AuthContext{Cancel: ctx}, &SSHConfig{Host: "example.com"}, Local, "1", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForConnectionError(t, conn, "cancelled")
+
+	conn, err = exec.Connect(nil, &SSHConfig{}, Local, "1", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForConnectionError(t, conn, "no host specified")
+}
+
 func TestMockConnectionAndExecutor(t *testing.T) {
 	conn := NewMockConnection()
 	var stopped int
@@ -503,4 +643,23 @@ func testPublicKey(t *testing.T) ssh.PublicKey {
 		t.Fatal(err)
 	}
 	return signer.PublicKey()
+}
+
+func waitForConnectionError(t *testing.T, conn Connection, want string) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("connection error = %q, want substring %q", conn.Error(), want)
+		case <-ticker.C:
+			if strings.Contains(conn.Error(), want) {
+				return
+			}
+		}
+	}
 }
