@@ -716,6 +716,38 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
+func TestFormatTransferSpeed(t *testing.T) {
+	tests := []struct {
+		bytesPerSec int64
+		want        string
+	}{
+		{512, "0.5KB/s"},
+		{1536, "1.5KB/s"},
+		{2 * 1024 * 1024, "2.0MB/s"},
+	}
+
+	for _, tt := range tests {
+		if got := formatTransferSpeed(tt.bytesPerSec); got != tt.want {
+			t.Fatalf("formatTransferSpeed(%d) = %q, want %q", tt.bytesPerSec, got, tt.want)
+		}
+	}
+}
+
+func TestBuildSSHConfigUsesSelectedHost(t *testing.T) {
+	m := newTestModel(nil)
+	m.selectedHost = config.Host{
+		Hostname:     "example.com",
+		Port:         "2222",
+		User:         "alice",
+		IdentityFile: "~/.ssh/custom",
+	}
+
+	cfg := m.buildSSHConfig()
+	if cfg.Host != "example.com" || cfg.Port != "2222" || cfg.User != "alice" || cfg.IdentityFile != "~/.ssh/custom" {
+		t.Fatalf("buildSSHConfig = %#v", cfg)
+	}
+}
+
 func TestSFTPTransferErrorSetsStatus(t *testing.T) {
 	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
 	m := newTestModel(hosts)
@@ -892,6 +924,68 @@ func TestSFTPKeyFlowSwitchesFocusAndMovesOnlyActivePanel(t *testing.T) {
 	}
 }
 
+func TestSFTPEnterDirNavigatesLocalDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	childDir := filepath.Join(tmpDir, "child")
+	if err := os.Mkdir(childDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(childDir, "inside.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	m.sftpLocalDir = tmpDir
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "child", IsDir: true}}
+	m.sftpCursor[0] = 1
+
+	updated, _ := m.sftpEnterDir()
+	m = updated.(Model)
+
+	if m.sftpLocalDir != childDir {
+		t.Fatalf("sftpLocalDir = %q, want %q", m.sftpLocalDir, childDir)
+	}
+	if len(m.sftpLocalFiles) != 1 || m.sftpLocalFiles[0].Name != "inside.txt" {
+		t.Fatalf("local files = %#v, want inside.txt", m.sftpLocalFiles)
+	}
+	if m.sftpCursor[0] != 0 || m.sftpScroll[0] != 0 {
+		t.Fatalf("cursor/scroll = %d/%d, want reset", m.sftpCursor[0], m.sftpScroll[0])
+	}
+}
+
+func TestSFTPEnterDirRejectsFileSelection(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "file.txt"}}
+	m.sftpCursor[0] = 1
+
+	updated, _ := m.sftpEnterDir()
+	m = updated.(Model)
+
+	if !strings.Contains(m.statusMsg, "preview") {
+		t.Fatalf("statusMsg = %q, want preview hint", m.statusMsg)
+	}
+}
+
+func TestSFTPNavigateToCancelledContext(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.cancelCtx = ctx
+
+	updated, _ := m.sftpNavigateTo(t.TempDir())
+	m = updated.(Model)
+
+	if !strings.Contains(m.statusMsg, "cancelled") {
+		t.Fatalf("statusMsg = %q, want cancelled", m.statusMsg)
+	}
+}
+
 func TestSFTPKeyFlowBlocksActionsDuringTransfer(t *testing.T) {
 	tests := []struct {
 		key       tea.KeyMsg
@@ -1001,6 +1095,249 @@ func TestSFTPStartSyncRejectsDirectoryBeforeClientUse(t *testing.T) {
 	}
 	if m.sftpTransferring {
 		t.Fatal("directory selected with file sync should not start transfer")
+	}
+}
+
+func TestSFTPStartSyncRejectsRemoteDirectoryBeforeClientUse(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 1
+	m.sftpCursor[1] = 1
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "dir", IsDir: true}}
+
+	updated, cmd := m.sftpStartSync()
+	m = updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("directory selected with remote file sync should not return a command")
+	}
+	if !strings.Contains(m.statusMsg, "Use [r] for directory sync") {
+		t.Fatalf("statusMsg = %q, want directory sync hint", m.statusMsg)
+	}
+	if m.sftpTransferring {
+		t.Fatal("remote directory selected with file sync should not start transfer")
+	}
+}
+
+func TestSFTPDoSingleSyncRejectsEmptyPending(t *testing.T) {
+	m := newTestModel(nil)
+
+	updated, cmd := m.sftpDoSingleSync(sftpPendingSync{})
+	m = updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("empty pending sync should not return a command")
+	}
+	if m.sftpTransferring {
+		t.Fatal("empty pending sync should not enter transferring state")
+	}
+	if !strings.Contains(m.statusMsg, "No file selected") {
+		t.Fatalf("statusMsg = %q, want no file selected", m.statusMsg)
+	}
+}
+
+func TestValidateSingleSyncSourceRejectsLocalDirectoryAndMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	childDir := filepath.Join(tmpDir, "child")
+	if err := os.Mkdir(childDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestModel(nil)
+	updated, ok := m.validateSingleSyncSource(sftpPendingSync{focus: 0, source: filepath.Join(tmpDir, "missing")})
+	m = updated
+	if ok || !strings.Contains(m.statusMsg, "Source no longer exists") {
+		t.Fatalf("missing source ok=%v status=%q, want rejection", ok, m.statusMsg)
+	}
+
+	updated, ok = m.validateSingleSyncSource(sftpPendingSync{focus: 0, source: childDir})
+	m = updated
+	if ok || !strings.Contains(m.statusMsg, "Skipped non-regular file: directory") {
+		t.Fatalf("directory source ok=%v status=%q, want non-regular rejection", ok, m.statusMsg)
+	}
+}
+
+func TestSingleSyncOverwriteReportDetectsLocalTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "existing.txt")
+	if err := os.WriteFile(target, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestModel(nil)
+	report, err := m.singleSyncOverwriteReport(sftpPendingSync{focus: 1, target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Count != 1 || report.Items[0].Kind != "file" {
+		t.Fatalf("overwrite report = %#v, want one file", report)
+	}
+}
+
+func TestSFTPRecursiveConfirmRejectsInvalidSelection(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+
+	updated, cmd := m.sftpStartRecursiveConfirm()
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("missing recursive selection should not return a command")
+	}
+	if !strings.Contains(m.statusMsg, "No file selected") {
+		t.Fatalf("statusMsg = %q, want no file selected", m.statusMsg)
+	}
+
+	m.statusMsg = ""
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "file.txt"}}
+	m.sftpCursor[0] = 1
+	updated, cmd = m.sftpStartRecursiveConfirm()
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("file recursive sync should not return a command")
+	}
+	if !strings.Contains(m.statusMsg, "Use [s] for file sync") {
+		t.Fatalf("statusMsg = %q, want file sync hint", m.statusMsg)
+	}
+}
+
+func TestSFTPDoRecursiveRejectsInvalidSelection(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+
+	updated, cmd := m.sftpDoRecursive()
+	m = updated.(Model)
+	if cmd != nil || m.sftpTransferring {
+		t.Fatal("missing local recursive selection should not start transfer")
+	}
+
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "file.txt"}}
+	m.sftpCursor[0] = 1
+	updated, cmd = m.sftpDoRecursive()
+	m = updated.(Model)
+	if cmd != nil || m.sftpTransferring {
+		t.Fatal("local file recursive selection should not start transfer")
+	}
+
+	m.sftpFocus = 1
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "file.txt"}}
+	m.sftpCursor[1] = 1
+	updated, cmd = m.sftpDoRecursive()
+	m = updated.(Model)
+	if cmd != nil || m.sftpTransferring {
+		t.Fatal("remote file recursive selection should not start transfer")
+	}
+}
+
+func TestRenderSFTPPreviewTruncatesAndCapsLines(t *testing.T) {
+	m := newTestModel(nil)
+	m.sftpPreview = "abcdefghijklmnopqrstuvwxyz\nline-2\nline-3"
+
+	rendered := stripANSI(m.renderSFTPPreview(10, 2))
+	if !strings.Contains(rendered, "Preview") {
+		t.Fatalf("preview render missing title:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "line-3") {
+		t.Fatalf("preview should cap rendered lines:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "abcdefghijklmnopqrstuvwxyz") {
+		t.Fatalf("preview should truncate long lines:\n%s", rendered)
+	}
+}
+
+func TestSFTPPreviewLocalTextAndBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	textFile := filepath.Join(tmpDir, "text.txt")
+	if err := os.WriteFile(textFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	binaryFile := filepath.Join(tmpDir, "binary.bin")
+	if err := os.WriteFile(binaryFile, []byte{'a', 0, 'b'}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	m.sftpLocalDir = tmpDir
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "text.txt"}, {Name: "binary.bin"}}
+	m.sftpCursor[0] = 1
+
+	updated, _ := m.sftpPreviewFile()
+	m = updated.(Model)
+	if !m.sftpPreviewing || m.sftpPreview != "hello" {
+		t.Fatalf("text preview = %q previewing=%v, want hello true", m.sftpPreview, m.sftpPreviewing)
+	}
+
+	m.sftpCursor[0] = 2
+	updated, _ = m.sftpPreviewFile()
+	m = updated.(Model)
+	if m.sftpPreview != "[binary file]" {
+		t.Fatalf("binary preview = %q, want binary marker", m.sftpPreview)
+	}
+}
+
+func TestSFTPPreviewRejectsDirectoryAndMissingSelection(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "dir", IsDir: true}}
+
+	updated, _ := m.sftpPreviewFile()
+	m = updated.(Model)
+	if !strings.Contains(m.statusMsg, "No file selected") {
+		t.Fatalf("statusMsg = %q, want no selection", m.statusMsg)
+	}
+
+	m.statusMsg = ""
+	m.sftpCursor[0] = 1
+	updated, _ = m.sftpPreviewFile()
+	m = updated.(Model)
+	if !strings.Contains(m.statusMsg, "Cannot preview a directory") {
+		t.Fatalf("statusMsg = %q, want directory rejection", m.statusMsg)
+	}
+}
+
+func TestSFTPConfirmRenameLocalSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldPath := filepath.Join(tmpDir, "old.txt")
+	if err := os.WriteFile(oldPath, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	m.sftpLocalDir = tmpDir
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "old.txt"}}
+	m.sftpCursor[0] = 1
+	m.sftpRenaming = true
+	m.sftpRenameInput = "new.txt"
+
+	updated, _ := m.sftpConfirmRename()
+	m = updated.(Model)
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "new.txt")); err != nil {
+		t.Fatalf("renamed file missing: %v", err)
+	}
+	if m.sftpRenaming || m.sftpRenameInput != "" {
+		t.Fatalf("rename state not cleared: renaming=%v input=%q", m.sftpRenaming, m.sftpRenameInput)
+	}
+}
+
+func TestSFTPContextAndPreviewHeightFallbacks(t *testing.T) {
+	m := Model{}
+	if m.sftpContext() == nil {
+		t.Fatal("sftpContext should return a background context when cancelCtx is nil")
+	}
+	m.height = 8
+	if got := m.sftpPreviewHeight(); got != 4 {
+		t.Fatalf("small preview height = %d, want 4", got)
+	}
+	m.height = 80
+	if got := m.sftpPreviewHeight(); got != 8 {
+		t.Fatalf("large preview height = %d, want 8", got)
 	}
 }
 
@@ -1160,6 +1497,59 @@ func TestStaleSFTPTransferResultKeepsTickAlive(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("tick should continue scheduling the next tick after stale result")
+	}
+}
+
+func TestSampleTunnelTrafficCapsHistoryAndDropsStaleIDs(t *testing.T) {
+	m := newTestModel(nil)
+	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
+	tun, err := m.manager.Create("flow", cfg, tunnel.Local, "8080", "80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.trafficHist = map[int][]int64{999: []int64{1, 2, 3}}
+
+	for i := 0; i < 125; i++ {
+		tun.UpdateStats(0, 0, int64(i), int64(i), 0, true)
+		m.sampleTunnelTraffic()
+	}
+
+	if _, ok := m.trafficHist[999]; ok {
+		t.Fatal("traffic history should drop stale tunnel IDs")
+	}
+	history := m.trafficHist[tun.ID]
+	if len(history) != 120 {
+		t.Fatalf("history length = %d, want 120", len(history))
+	}
+	if got := history[len(history)-1]; got != 248 {
+		t.Fatalf("last traffic sample = %d, want 248", got)
+	}
+}
+
+func TestRenderTrafficFlowUsesFixedWidthAndNoLabel(t *testing.T) {
+	rendered := stripANSI(renderTrafficFlow([]int64{0, 1024, 64 * 1024, 1024 * 1024}, 12))
+	if strings.Contains(rendered, "FLOW") {
+		t.Fatalf("traffic flow should not include a label: %q", rendered)
+	}
+	if got := len([]rune(rendered)); got != 20 {
+		t.Fatalf("rendered flow width = %d, want minimum 20: %q", got, rendered)
+	}
+}
+
+func TestTableLayoutAndStatusStyles(t *testing.T) {
+	narrow := newTableLayout(60)
+	wide := newTableLayout(200)
+	if narrow.nameW < 10 || narrow.addrW < 8 {
+		t.Fatalf("narrow layout has invalid widths: %#v", narrow)
+	}
+	if wide.nameW <= narrow.nameW {
+		t.Fatalf("wide layout should allocate more name width: narrow=%#v wide=%#v", narrow, wide)
+	}
+
+	for _, status := range []string{"Running", "Connecting", "Error", "Stopped", "Other"} {
+		if got := statusTextStyle(status).Render(status); stripANSI(got) != status {
+			t.Fatalf("statusTextStyle(%q) rendered %q", status, got)
+		}
 	}
 }
 

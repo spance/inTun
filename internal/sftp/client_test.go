@@ -315,6 +315,59 @@ func TestLocalPathInfoDetectsExistingFile(t *testing.T) {
 	}
 }
 
+func TestFileEntryKindClassifiesAllKnownTypes(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry FileEntry
+		want  string
+	}{
+		{name: "directory", entry: FileEntry{IsDir: true, Mode: os.ModeDir}, want: "directory"},
+		{name: "file", entry: FileEntry{Mode: 0644}, want: "file"},
+		{name: "symlink", entry: FileEntry{Mode: os.ModeSymlink}, want: "symbolic link"},
+		{name: "socket", entry: FileEntry{Mode: os.ModeSocket}, want: "socket"},
+		{name: "device", entry: FileEntry{Mode: os.ModeDevice}, want: "device file"},
+		{name: "pipe", entry: FileEntry{Mode: os.ModeNamedPipe}, want: "named pipe"},
+		{name: "irregular", entry: FileEntry{Mode: os.ModeIrregular}, want: "irregular file"},
+		{name: "zero-mode", entry: FileEntry{}, want: "file"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FileEntryKind(tt.entry); got != tt.want {
+				t.Fatalf("FileEntryKind = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLocalExistingKindDetectsMissingAndSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	missing := filepath.Join(tmpDir, "missing")
+	kind, exists, err := localExistingKind(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists || kind != "" {
+		t.Fatalf("missing localExistingKind = %q/%v, want empty false", kind, exists)
+	}
+
+	target := filepath.Join(tmpDir, "target")
+	if err := os.WriteFile(target, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmpDir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	kind, exists, err = localExistingKind(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || kind != "symbolic link" {
+		t.Fatalf("symlink localExistingKind = %q/%v, want symbolic link true", kind, exists)
+	}
+}
+
 func TestLocalDirectoryTargetConflictDetectsNonDirectories(t *testing.T) {
 	tmpDir := t.TempDir()
 	fileTarget := filepath.Join(tmpDir, "target")
@@ -383,6 +436,68 @@ func TestAllowLocalDirectoryTargetSkipsNonDirectories(t *testing.T) {
 	}
 	if report.HasSkipped() {
 		t.Fatalf("missing target should not report skipped entries: %#v", report)
+	}
+}
+
+func TestClientMethodsRespectCanceledContextBeforeRemoteIO(t *testing.T) {
+	client := NewClient(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := client.ReadRemoteDir(ctx, "/remote"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadRemoteDir error = %v, want context.Canceled", err)
+	}
+	if _, _, err := client.RemotePathInfo(ctx, "/remote/file"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RemotePathInfo error = %v, want context.Canceled", err)
+	}
+	if _, err := client.Preview(ctx, "/remote/file"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Preview error = %v, want context.Canceled", err)
+	}
+	if err := client.Rename(ctx, "/old", "/new"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Rename error = %v, want context.Canceled", err)
+	}
+	if err := client.Download(ctx, "/remote/file", filepath.Join(t.TempDir(), "file"), nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Download error = %v, want context.Canceled", err)
+	}
+	if err := client.Upload(ctx, filepath.Join(t.TempDir(), "file"), "/remote/file", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Upload error = %v, want context.Canceled", err)
+	}
+	if _, err := client.DownloadDir(ctx, "/remote/dir", t.TempDir(), nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DownloadDir error = %v, want context.Canceled", err)
+	}
+	if _, err := client.UploadDir(ctx, t.TempDir(), "/remote/dir", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UploadDir error = %v, want context.Canceled", err)
+	}
+	if _, err := client.UploadDirOverwriteReport(ctx, t.TempDir(), "/remote/dir"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UploadDirOverwriteReport error = %v, want context.Canceled", err)
+	}
+	if _, err := client.DownloadDirOverwriteReport(ctx, "/remote/dir", t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DownloadDirOverwriteReport error = %v, want context.Canceled", err)
+	}
+	if _, _, err := client.remoteExistingKind(ctx, "/remote/file"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("remoteExistingKind error = %v, want context.Canceled", err)
+	}
+	if _, err := client.remoteRegularFileTotal(ctx, "/remote/dir", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("remoteRegularFileTotal error = %v, want context.Canceled", err)
+	}
+	var report TransferReport
+	var done int64
+	if err := client.downloadRemoteEntry(ctx, "/remote/dir", "/remote/dir/file", t.TempDir(), nil, &report, &done, 0, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("downloadRemoteEntry error = %v, want context.Canceled", err)
+	}
+}
+
+func TestReportDefaultReasons(t *testing.T) {
+	var transferReport TransferReport
+	transferReport.addSkipped("/tmp/file", "")
+	if transferReport.Skipped[0].Reason != "skipped" {
+		t.Fatalf("empty skipped reason = %q, want default", transferReport.Skipped[0].Reason)
+	}
+
+	var overwriteReport OverwriteReport
+	overwriteReport.AddExisting("/remote/file", "")
+	if overwriteReport.Items[0].Kind != "existing target" {
+		t.Fatalf("empty overwrite kind = %q, want default", overwriteReport.Items[0].Kind)
 	}
 }
 
@@ -455,6 +570,15 @@ func TestWalkLocalTreeSkipsDirectoryWhenEntryRequestsSkipDir(t *testing.T) {
 	}
 }
 
+func TestIgnoreLocalWalkErrorSkipsDirectoriesOnly(t *testing.T) {
+	if err := ignoreLocalWalkError("/dir", modeInfo{mode: os.ModeDir, dir: true}, os.ErrPermission); err != filepath.SkipDir {
+		t.Fatalf("directory error = %v, want SkipDir", err)
+	}
+	if err := ignoreLocalWalkError("/file", modeInfo{mode: 0644}, os.ErrPermission); err != nil {
+		t.Fatalf("file error = %v, want nil", err)
+	}
+}
+
 func TestTransferReportLocalWalkErrorRecordsAndSkipsDirectory(t *testing.T) {
 	var report TransferReport
 	errHandler := transferReportLocalWalkError(&report)
@@ -489,5 +613,58 @@ func TestNonRegularFileReasonClassifiesCommonTypes(t *testing.T) {
 				t.Fatalf("nonRegularFileReason(%v) = %q, want %q", tt.mode, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestProgressInfoSetDoneAndActive(t *testing.T) {
+	progress := NewProgressInfo("file.txt", 10)
+	progress.SetDone(7)
+	progress.SetActive(false)
+
+	snapshot := progress.Snapshot()
+	if snapshot.Done != 7 {
+		t.Fatalf("Done = %d, want 7", snapshot.Done)
+	}
+	if snapshot.Active {
+		t.Fatal("SetActive(false) should mark progress inactive")
+	}
+}
+
+type closeRecorder struct {
+	closed chan struct{}
+}
+
+func (c closeRecorder) Close() error {
+	close(c.closed)
+	return nil
+}
+
+func TestCloseOnCancelClosesResource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	closed := make(chan struct{})
+	stopWatching := closeOnCancel(ctx, closeRecorder{closed: closed})
+	cancel()
+
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("resource was not closed after context cancellation")
+	}
+	stopWatching()
+}
+
+func TestCloseOnCancelStopPreventsClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan struct{})
+	stopWatching := closeOnCancel(ctx, closeRecorder{closed: closed})
+	stopWatching()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-closed:
+		t.Fatal("resource should not close after watcher is stopped")
+	case <-time.After(20 * time.Millisecond):
 	}
 }

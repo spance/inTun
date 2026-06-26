@@ -1,6 +1,8 @@
 package tunnel
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,5 +262,112 @@ func TestTunnelGetStatusAndError(t *testing.T) {
 
 	if diff := cmp.Diff(tun.GetError(), "test error"); diff != "" {
 		t.Errorf("GetError() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestManagerGetReturnsMatchingTunnel(t *testing.T) {
+	mockExec := platform.NewMockExecutor()
+	m := newTestManager(mockExec)
+	cfg := &platform.SSHConfig{Host: "example.com"}
+
+	first, err := m.Create("first", cfg, Local, "8080", "80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.Create("second", cfg, Remote, "9090", "90")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := m.Get(second.ID); got != second {
+		t.Fatalf("Get(%d) = %#v, want second tunnel", second.ID, got)
+	}
+	if got := m.Get(first.ID); got != first {
+		t.Fatalf("Get(%d) = %#v, want first tunnel", first.ID, got)
+	}
+	if got := m.Get(999); got != nil {
+		t.Fatalf("Get missing tunnel = %#v, want nil", got)
+	}
+}
+
+func TestTunnelGetSnapshotReturnsAtomicStats(t *testing.T) {
+	tun := &Tunnel{}
+	tun.UpdateStats(123, 456, 7, 8, 25*time.Millisecond, true)
+
+	got := tun.GetSnapshot()
+	if got.UploadBytes != 123 || got.DownloadBytes != 456 {
+		t.Fatalf("GetSnapshot = %#v, want upload 123 download 456", got)
+	}
+}
+
+type testSFTPConnection struct {
+	*platform.MockConnection
+	client interface{}
+	err    error
+}
+
+func (c *testSFTPConnection) NewSFTPClient() (interface{}, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.client, nil
+}
+
+func TestManagerGetSFTPClient(t *testing.T) {
+	wantClient := struct{ name string }{name: "sftp"}
+	conn := &testSFTPConnection{MockConnection: platform.NewMockConnection(), client: wantClient}
+	m := newTestManager(platform.NewMockExecutor())
+	m.Tunnels = append(m.Tunnels, &Tunnel{ID: 1, Status: StatusRunning, Conn: conn})
+
+	got, err := m.GetSFTPClient(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantClient {
+		t.Fatalf("GetSFTPClient = %#v, want %#v", got, wantClient)
+	}
+}
+
+func TestManagerGetSFTPClientRejectsInvalidStates(t *testing.T) {
+	m := newTestManager(platform.NewMockExecutor())
+	m.Tunnels = append(m.Tunnels,
+		&Tunnel{ID: 1, Status: StatusStopped, Conn: &testSFTPConnection{MockConnection: platform.NewMockConnection()}},
+		&Tunnel{ID: 2, Status: StatusRunning, Conn: platform.NewMockConnection()},
+		&Tunnel{ID: 3, Status: StatusRunning, Conn: &testSFTPConnection{MockConnection: platform.NewMockConnection(), err: fmt.Errorf("sftp failed")}},
+	)
+
+	tests := []struct {
+		id   int
+		want string
+	}{
+		{id: 1, want: "is not running"},
+		{id: 2, want: "does not support SFTP"},
+		{id: 3, want: "sftp failed"},
+		{id: 99, want: "not found"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("id-%d", tt.id), func(t *testing.T) {
+			_, err := m.GetSFTPClient(tt.id)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("GetSFTPClient(%d) error = %v, want containing %q", tt.id, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestManagerSettersAffectCreate(t *testing.T) {
+	authCtx := &platform.AuthContext{}
+	mockExec := platform.NewMockExecutor()
+	m := NewManager(nil)
+	m.SetAuthContext(authCtx)
+	m.SetExecutor(mockExec)
+
+	cfg := &platform.SSHConfig{Host: "example.com"}
+	if _, err := m.Create("test", cfg, Local, "8080", "80"); err != nil {
+		t.Fatal(err)
+	}
+	if mockExec.GetCallCount() != 1 {
+		t.Fatalf("custom executor call count = %d, want 1", mockExec.GetCallCount())
 	}
 }
