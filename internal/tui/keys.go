@@ -9,6 +9,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.confirmQuit {
 		return m.handleQuitConfirmKeys(msg)
 	}
+	if m.statusConfirm && m.statusMsg != "" {
+		return m.handleStatusConfirmKeys(msg)
+	}
 
 	switch m.screen {
 	case ScreenMain:

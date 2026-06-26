@@ -355,9 +355,14 @@ func (m Model) renderStatusOverlay(width int) ModalView {
 		return ModalView{}
 	}
 	body, fields := modalMessageParts(m.statusMsg)
+	var actions []ModalAction
+	if m.statusConfirm {
+		actions = []ModalAction{{Key: "Enter/Esc", Label: "OK"}}
+	}
 	return renderModalSpec(width, ModalSpec{
-		Title:  "Notice",
-		Body:   body,
-		Fields: fields,
+		Title:   "Notice",
+		Body:    body,
+		Fields:  fields,
+		Actions: actions,
 	})
 }

@@ -413,7 +413,7 @@ func TestViewPromptOverlayFitsMinimumWidth(t *testing.T) {
 	respChan := make(chan platform.AuthResponse, 1)
 	req := platform.AuthRequest{
 		Type:       platform.AuthRequestPassword,
-		Host:       "very-long-user-name@very-long-host-name.example.internal",
+		Host:       "very-long-user-name@very-long-host-name.example.com",
 		RetryCount: 1,
 		Response:   respChan,
 	}
@@ -676,7 +676,7 @@ func TestViewSFTPTopBarKeepsSingleModeTag(t *testing.T) {
 
 func TestRenderSFTPPanelSplitsTitleAndPath(t *testing.T) {
 	m := newTestModelWithTunnel()
-	m.sftpLocalDir = "/Users/example/projects/intun"
+	m.sftpLocalDir = "/path/to/intun"
 	m.sftpLocalFiles = []sftp.FileEntry{{Name: "file.txt", Size: 1024}}
 
 	clean := stripANSI(m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, 48, 12, true))
@@ -688,7 +688,7 @@ func TestRenderSFTPPanelSplitsTitleAndPath(t *testing.T) {
 		if strings.Contains(line, "LOCAL") && strings.Contains(line, "1 items") {
 			labelLine = i
 		}
-		if strings.Contains(line, "Users") && strings.Contains(line, "intun") {
+		if strings.Contains(line, "path") && strings.Contains(line, "intun") {
 			pathLine = i
 		}
 	}
@@ -820,11 +820,14 @@ func TestViewSFTPStatusUsesModalMask(t *testing.T) {
 	m.sftpLocalFiles = []sftp.FileEntry{{Name: "panel-local.bin", IsDir: false}}
 	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "panel-remote.bin", IsDir: false}}
 	m.statusMsg = "SFTP upload complete\nFROM: /local/test.txt\nTO: /remote/test.txt"
-	m.statusTicks = 3
+	m.statusConfirm = true
 
 	clean := stripANSI(m.View().Content)
 	if !strings.Contains(clean, "Notice") || !strings.Contains(clean, "SFTP upload complete") {
 		t.Fatalf("expected SFTP status modal, got:\n%s", clean)
+	}
+	if !strings.Contains(clean, "OK") {
+		t.Fatalf("confirmed SFTP status modal should show OK action:\n%s", clean)
 	}
 	if strings.Contains(clean, "panel-local.bin") || strings.Contains(clean, "panel-remote.bin") {
 		t.Fatalf("SFTP modal mask should hide panel content:\n%s", clean)
@@ -919,7 +922,7 @@ func TestViewSFTPLayoutFitsNarrowWidth(t *testing.T) {
 	m.screen = ScreenSFTP
 	m.width = 80
 	m.height = 20
-	m.sftpLocalDir = "/Users/example/projects/a-very-long-local-directory-name"
+	m.sftpLocalDir = "/path/to/a-very-long-local-directory-name"
 	m.sftpRemoteDir = "/home/example/a-very-long-remote-directory-name"
 	m.sftpLocalFiles = []sftp.FileEntry{{Name: "very-long-local-file-name-that-needs-truncation.bin", Size: 987654321}}
 	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "very-long-remote-file-name-that-needs-truncation.bin", Size: 123456789}}

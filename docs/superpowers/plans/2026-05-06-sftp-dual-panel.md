@@ -33,7 +33,7 @@
 - [ ] **Step 1: Install dependency**
 
 ```bash
-cd /Users/spance/projects/inTun
+cd /path/to/inTun
 go get github.com/pkg/sftp
 ```
 

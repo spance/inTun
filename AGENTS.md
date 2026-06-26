@@ -96,7 +96,7 @@ internal/
 - Sync direction follows the active panel: Local uploads to Remote, Remote downloads to Local
 - Rename accepts basename-only names and rejects path separators, `.` and `..`
 - Preview reads the first 4KB of a file
-- Transfer progress is shown in a drawer; status, confirm, and error notices use the shared modal component
+- Transfer progress is shown in a drawer; transfer results stay in a shared modal until the user confirms with Enter/Esc
 - Exiting SFTP with `q`/Esc cancels active transfer and synchronously closes the SFTP client
 
 ### Cross-platform
@@ -128,6 +128,7 @@ internal/
 - [ ] SFTP rename rejects path separators and parent/current directory names
 - [ ] SFTP exit during transfer cancels the operation and returns to the main screen
 - [ ] Global modal overlays show only the centered dialog on a full-screen mask
+- [ ] Release scan has no credentials, private keys, tokens, local filesystem paths, usernames, machine names, or private host/domain names
 
 ## Known Limitations
 - SOCKS5 dynamic proxy: no-auth only, no IPv6 address type

@@ -18,7 +18,7 @@ Interactive SSH Tunnel - 跨平台 SSH 隧道管理器，基于纯 Go 实现，�
 - **密码认证**：通过 TUI 交互式输入密码，支持键盘交互式认证
 - **连接健康检测**：SSH/TCP 双重保活，连接断开自动提示重连
 - **远程隧道 LAN 目标**：本地目标和远程监听均支持 `ip:port` 格式
-- **内置 SFTP 管理器**：本地/远程双面板浏览，支持文件同步、目录同步、重命名和预览
+- **内置 SFTP 管理器**：本地/远程双面板浏览，支持文件同步、目录同步、重命名、预览和传输结果确认
 - **键盘驱动界面**：快捷键操作，高效导航
 
 ## 安装
@@ -88,6 +88,7 @@ SFTP 界面：
 | `n` | 重命名选中项 |
 | `v` | 预览选中文件 |
 | `q` / `Esc` | 关闭预览或退出 SFTP |
+| `Enter` / `Esc` | 确认传输结果通知 |
 
 ## 系统要求
 
@@ -124,7 +125,7 @@ Host myserver
 - **SFTP 库**: [github.com/pkg/sftp](https://github.com/pkg/sftp)
 - **样式渲染**: [lipgloss](https://github.com/charmbracelet/lipgloss)
 - **统计监控**: 1秒间隔采样，5秒间隔 SSH 探测，TX/RX 总量 + ↑↓ 速率指示
-- **TUI 安全性**: 共享 modal 弹窗、可取消的 SFTP 操作、串行化 SFTP 客户端访问
+- **TUI 安全性**: 共享 modal 弹窗、SFTP 传输结果确认、可取消的 SFTP 操作、串行化 SFTP 客户端访问
 
 ## 开发
 
@@ -142,6 +143,10 @@ go build -ldflags "-X main.Version=$VERSION" ./cmd/intun
 # 交叉编译
 make all    # 全平台编译
 ```
+
+### 发布检查
+
+发布前需要运行测试，并扫描已跟踪文件中的敏感信息。凭据、私钥、token、本地文件系统路径、用户名、机器名、私有主机名和私有域名都应视为发布阻断项。文档和测试示例应使用 `example.com`、`/path/to/project`、`user` 等占位内容。
 
 ### 调试
 

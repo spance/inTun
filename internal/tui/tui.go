@@ -59,6 +59,7 @@ type Model struct {
 	err           error
 	statusMsg     string
 	statusTicks   int
+	statusConfirm bool
 	trafficHist   map[int][]int64
 	authQueue     *AuthPromptQueue
 	promptMode    bool
@@ -116,6 +117,13 @@ type sftpPendingSync struct {
 func (m *Model) setStatusMsg(msg string) {
 	m.statusMsg = msg
 	m.statusTicks = 3
+	m.statusConfirm = false
+}
+
+func (m *Model) setStatusConfirm(msg string) {
+	m.statusMsg = msg
+	m.statusTicks = 0
+	m.statusConfirm = true
 }
 
 func (m *Model) sampleTunnelTraffic() {

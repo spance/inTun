@@ -39,7 +39,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyPress(msg)
 	case tickMsg:
 		m.sampleTunnelTraffic()
-		if m.statusTicks > 0 {
+		if !m.statusConfirm && m.statusTicks > 0 {
 			m.statusTicks--
 			if m.statusTicks == 0 {
 				m.statusMsg = ""
@@ -63,16 +63,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					if m.screen == ScreenSFTP {
 						if result.err != nil {
-							m.setStatusMsg(formatSFTPTransferError(result))
+							m.setStatusConfirm(formatSFTPTransferError(result))
 						} else {
-							m.setStatusMsg(formatSFTPTransferSuccess(result))
+							m.setStatusConfirm(formatSFTPTransferSuccess(result))
 						}
 					}
 					if result.err == nil && m.screen == ScreenSFTP && m.sftpClient != nil {
 						var refreshErr error
 						m, refreshErr = m.refreshSFTPFiles()
 						if refreshErr != nil {
-							m.setStatusMsg(fmt.Sprintf("Transfer finished, but refresh failed: %v", refreshErr))
+							m.setStatusConfirm(fmt.Sprintf("Transfer finished, but refresh failed: %v", refreshErr))
 						}
 					}
 					m.sftpDone = nil

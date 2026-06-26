@@ -16,6 +16,16 @@ func (m Model) handleQuitConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleStatusConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "esc", "o", "q":
+		m.statusMsg = ""
+		m.statusTicks = 0
+		m.statusConfirm = false
+	}
+	return m, nil
+}
+
 func (m Model) handlePromptKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	current := m.authQueue.Current()
 	if current == nil {

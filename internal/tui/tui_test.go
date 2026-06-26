@@ -768,11 +768,46 @@ func TestSFTPTransferErrorSetsStatus(t *testing.T) {
 	if m.statusMsg == "" || !strings.Contains(m.statusMsg, "permission denied") {
 		t.Fatalf("statusMsg = %q, want transfer error", m.statusMsg)
 	}
+	if !m.statusConfirm {
+		t.Fatal("transfer result notice should wait for user confirmation")
+	}
 	if !strings.Contains(m.statusMsg, "FROM:") || !strings.Contains(m.statusMsg, "TO:") {
 		t.Fatalf("statusMsg = %q, want source and target context", m.statusMsg)
 	}
 	if m.sftpProgress.Snapshot().Active {
 		t.Fatal("progress should be inactive after result")
+	}
+}
+
+func TestStatusConfirmWaitsForUserOK(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.setStatusConfirm("SFTP upload complete")
+
+	m = updateModel(m, tickMsg{})
+	m = updateModel(m, tickMsg{})
+	m = updateModel(m, tickMsg{})
+
+	if m.statusMsg == "" || !m.statusConfirm {
+		t.Fatalf("confirmed status should not auto-dismiss, msg=%q confirm=%v", m.statusMsg, m.statusConfirm)
+	}
+
+	m = updateModel(m, keyEnter())
+	if m.statusMsg != "" || m.statusConfirm {
+		t.Fatalf("Enter should clear confirmed status, msg=%q confirm=%v", m.statusMsg, m.statusConfirm)
+	}
+}
+
+func TestAutoStatusStillExpires(t *testing.T) {
+	m := newTestModel(nil)
+	m.setStatusMsg("short notice")
+
+	m = updateModel(m, tickMsg{})
+	m = updateModel(m, tickMsg{})
+	m = updateModel(m, tickMsg{})
+
+	if m.statusMsg != "" || m.statusConfirm {
+		t.Fatalf("auto status should expire, msg=%q confirm=%v", m.statusMsg, m.statusConfirm)
 	}
 }
 

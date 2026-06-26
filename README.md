@@ -18,7 +18,7 @@ Interactive SSH Tunnel - A cross-platform SSH tunnel manager with a rich TUI int
 - **Password Authentication**: Interactive password and keyboard-interactive auth via TUI prompts
 - **Connection Health**: SSH/TCP keepalive with automatic reconnection prompts on connection loss
 - **Remote Tunnel LAN Targets**: Supports `ip:port` format for both local target and remote listen address
-- **Integrated SFTP Manager**: Dual-panel local/remote browser with file sync, directory sync, rename, and preview
+- **Integrated SFTP Manager**: Dual-panel local/remote browser with file sync, directory sync, rename, preview, and acknowledged transfer results
 - **Keyboard-driven Interface**: Efficient navigation and control via shortcuts
 
 ## Installation
@@ -88,6 +88,7 @@ SFTP screen:
 | `n` | Rename selected item |
 | `v` | Preview selected file |
 | `q` / `Esc` | Close preview or exit SFTP |
+| `Enter` / `Esc` | Acknowledge transfer result notices |
 
 ### Requirements
 
@@ -124,7 +125,7 @@ Supported fields:
 - **SFTP Library**: [github.com/pkg/sftp](https://github.com/pkg/sftp)
 - **Styling**: [lipgloss](https://github.com/charmbracelet/lipgloss)
 - **Statistics**: 1s interval sampling, 5s interval ping, TX/RX totals with ↑↓ speed indicators
-- **TUI Safety**: Shared modal overlays, cancelable SFTP operations, and serialized SFTP client access
+- **TUI Safety**: Shared modal overlays, acknowledged SFTP transfer results, cancelable SFTP operations, and serialized SFTP client access
 
 ## Development
 
@@ -142,6 +143,10 @@ go build -ldflags "-X main.Version=$VERSION" ./cmd/intun
 # Cross-compile
 make all    # All architectures
 ```
+
+### Release hygiene
+
+Before publishing a release, run the test suite and scan tracked files for sensitive material. Treat credentials, private keys, tokens, local filesystem paths, usernames, machine names, and private host/domain names as release blockers. Keep examples anonymized with placeholders such as `example.com`, `/path/to/project`, and `user`.
 
 ### Debugging
 
