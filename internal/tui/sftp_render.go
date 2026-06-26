@@ -21,6 +21,8 @@ func (m Model) renderSFTPScreen() string {
 	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, panelHeight, m.sftpFocus == 1)
 	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, localPanel, " ", remotePanel))
 	b.WriteString("\n")
+	b.WriteString(m.renderSFTPSelectedDetail(width - 2))
+	b.WriteString("\n")
 
 	if m.sftpRenaming {
 		input := m.sftpRenameInput + "_"
@@ -47,34 +49,36 @@ func (m Model) renderSFTPScreen() string {
 func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelIdx, width, height int, focused bool) string {
 	var b strings.Builder
 
-	count := fmt.Sprintf("%d items", len(files))
-	labelStyle := lipgloss.NewStyle().
-		Foreground(colorMuted).
-		Bold(true).
-		Padding(0, 1)
-	if focused {
-		labelStyle = labelStyle.
-			Background(colorAccent).
-			Foreground(colorPanel)
-	}
-	title := labelStyle.Render(label) + " " + mutedStyle.Render(count)
-	dirWidth := max(10, width-lipgloss.Width(title)-4)
-	dirText := mutedStyle.Render(truncateMiddle(dir, min(dirWidth, max(10, width/2))))
-	title = title + lipgloss.PlaceHorizontal(max(1, width-lipgloss.Width(title)-2), lipgloss.Right, dirText)
-	b.WriteString(title)
-	b.WriteString("\n")
-	b.WriteString(lineStyle.Render(strings.Repeat("─", max(1, width-4))))
-	b.WriteString("\n")
-
+	innerWidth := max(1, width-4)
 	visibleHeight := height - sftpPanelRowsAroundList
 	if visibleHeight < sftpMinListRows {
 		visibleHeight = sftpMinListRows
 	}
-
 	cursor := m.sftpCursor[panelIdx]
 	scroll := m.sftpScroll[panelIdx]
-
 	totalEntries := len(files) + 1
+	rangeText := sftpPanelRangeLabel(len(files), scroll, visibleHeight)
+	labelStyle := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		Bold(true)
+	countStyle := mutedStyle
+	if focused {
+		labelStyle = labelStyle.
+			Background(colorAccent).
+			Foreground(colorPanel).
+			Padding(0, 1)
+		countStyle = accentStyle
+	}
+	titleLeft := labelStyle.Render(label)
+	count := countStyle.Render(fmt.Sprintf("%d items · %s", len(files), rangeText))
+	title := titleLeft + lipgloss.PlaceHorizontal(max(1, innerWidth-lipgloss.Width(titleLeft)), lipgloss.Right, count)
+	b.WriteString(title)
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(formatSFTPBreadcrumb(dir, innerWidth)))
+	b.WriteString("\n")
+	b.WriteString(lineStyle.Render(strings.Repeat("─", innerWidth)))
+	b.WriteString("\n")
+
 	renderIdx := 0
 	for i := scroll; i < totalEntries && renderIdx < visibleHeight; i++ {
 		b.WriteString(m.renderSFTPEntryLine(files, i, cursor, width, focused))
@@ -91,63 +95,20 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 }
 
 func (m Model) renderSFTPEntryLine(files []sftp.FileEntry, i, cursor, width int, focused bool) string {
-	var name, sizeStr string
-	var isDir bool
-
-	if i == 0 {
-		name = ".."
-		isDir = true
-	} else {
-		idx := i - 1
-		if idx >= len(files) {
-			return ""
-		}
-		entry := files[idx]
-		name = entry.Name
-		isDir = entry.IsDir
-		if !isDir && entry.Size > 0 {
-			sizeStr = formatBytes(entry.Size)
-		}
-	}
-
-	displayName := name
-	if isDir && i > 0 {
-		displayName = name + "/"
+	entry, ok := sftpEntryViewAt(files, i)
+	if !ok {
+		return ""
 	}
 
 	prefix := "  "
 	if i == cursor {
-		prefix = "❯ "
-	}
-	marker := " "
-	if isDir {
-		marker = "/"
+		prefix = "› "
 	}
 
 	targetWidth := max(1, width-4)
-	leading := prefix + marker + " "
+	leading := prefix
 	leadingWidth := lipgloss.Width(leading)
-
-	var line string
-	if sizeStr != "" {
-		sizeWidth := lipgloss.Width(sizeStr)
-		if sizeWidth > targetWidth-leadingWidth-2 {
-			sizeStr = truncate(sizeStr, max(1, targetWidth-leadingWidth-2))
-			sizeWidth = lipgloss.Width(sizeStr)
-		}
-		nameWidth := targetWidth - leadingWidth - sizeWidth - 1
-		if nameWidth < 1 {
-			nameWidth = 1
-		}
-		truncated := truncate(displayName, nameWidth)
-		padLen := targetWidth - leadingWidth - lipgloss.Width(truncated) - sizeWidth
-		if padLen < 0 {
-			padLen = 0
-		}
-		line = leading + truncated + strings.Repeat(" ", padLen) + sizeStr
-	} else {
-		line = leading + truncate(displayName, targetWidth-leadingWidth)
-	}
+	line := leading + renderSFTPEntryColumns(entry, targetWidth-leadingWidth)
 
 	linePad := targetWidth - lipgloss.Width(line)
 	if linePad > 0 {
@@ -155,19 +116,45 @@ func (m Model) renderSFTPEntryLine(files []sftp.FileEntry, i, cursor, width int,
 	}
 
 	if i == cursor && focused {
-		return lipgloss.NewStyle().Foreground(colorSelected).Background(colorPanelHi).Bold(true).Render(line)
+		return lipgloss.NewStyle().
+			Foreground(colorSelected).
+			Background(colorPanelHi).
+			Bold(true).
+			Render(line)
 	}
 	if i == cursor {
-		if isDir {
-			return dirStyle.Render(line)
+		if entry.isDir {
+			return lipgloss.NewStyle().Foreground(colorMuted).Render(line)
 		} else {
 			return inactiveStyle.Render(line)
 		}
 	}
-	if isDir {
+	if entry.isDir {
 		return dirStyle.Render(line)
 	}
 	return shortcutStyle.Render(line)
+}
+
+func (m Model) renderSFTPSelectedDetail(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	panel := "LOCAL"
+	dir := m.sftpLocalDir
+	files := m.sftpLocalFiles
+	cursor := m.sftpCursor[0]
+	if m.sftpFocus == 1 {
+		panel = "REMOTE"
+		dir = m.sftpRemoteDir
+		files = m.sftpRemoteFiles
+		cursor = m.sftpCursor[1]
+	}
+	body := renderSFTPSelectedDetail(panel, dir, files, cursor, max(1, width-2))
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(colorSurface).
+		Padding(0, 1).
+		Render(body)
 }
 
 func (m Model) renderSFTPPreview(width, maxLines int) string {
@@ -204,9 +191,9 @@ func (m Model) renderSFTPProgress(width int) string {
 		}
 	}
 
-	var speedStr string
+	speedStr := ""
 	if snapshot.Speed > 0 {
-		speedStr = " " + formatTransferSpeed(snapshot.Speed)
+		speedStr = formatTransferSpeed(snapshot.Speed)
 	}
 
 	barWidth := width
@@ -214,7 +201,41 @@ func (m Model) renderSFTPProgress(width int) string {
 		barWidth = 20
 	}
 
-	infoLine := warningStyle.Render(fmt.Sprintf("%s %s %.0f%%%s", m.sftpDirection, snapshot.File, pct*100, speedStr))
+	pctText := fmt.Sprintf("%.0f%%", pct*100)
+	rightBudget := max(4, barWidth/3)
+	right := pctText
+	if speedStr != "" {
+		speedBudget := rightBudget - lipgloss.Width(pctText) - 2
+		if speedBudget > 0 {
+			right += "  " + truncate(speedStr, speedBudget)
+		}
+	}
+	right = truncate(right, rightBudget)
+
+	gapWidth := 2
+	leftWidth := barWidth - lipgloss.Width(right) - gapWidth
+	if leftWidth < 8 {
+		gapWidth = 1
+		leftWidth = barWidth - lipgloss.Width(right) - gapWidth
+	}
+	if leftWidth < 1 {
+		right = truncate(right, max(1, barWidth-2))
+		leftWidth = barWidth - lipgloss.Width(right) - 1
+	}
+	if leftWidth < 1 {
+		leftWidth = 1
+	}
+
+	direction := m.sftpDirection
+	fileWidth := leftWidth - lipgloss.Width(direction) - 1
+	if fileWidth < 1 {
+		fileWidth = 1
+	}
+	left := strings.TrimSpace(fmt.Sprintf("%s %s", direction, truncateMiddle(snapshot.File, fileWidth)))
+	infoLine := warningStyle.Render(fitLine(left, leftWidth)) +
+		mutedStyle.Render(strings.Repeat(" ", gapWidth)) +
+		accentStyle.Render(right)
+	infoLine = fitLine(infoLine, barWidth)
 
 	return infoLine + "\n" + renderProgressBar(pct, barWidth)
 }

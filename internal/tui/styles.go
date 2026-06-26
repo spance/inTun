@@ -3,18 +3,19 @@ package tui
 import "charm.land/lipgloss/v2"
 
 var (
-	colorSurface  = lipgloss.Color("#161B22")
-	colorPanel    = lipgloss.Color("#0D1117")
-	colorPanelHi  = lipgloss.Color("#1F2937")
-	colorGlass    = lipgloss.Color("#111827")
-	colorText     = lipgloss.Color("#D6DEEB")
-	colorMuted    = lipgloss.Color("#7D8590")
-	colorAccent   = lipgloss.Color("#56B6C2")
-	colorAccent2  = lipgloss.Color("#7C3AED")
-	colorSuccess  = lipgloss.Color("#3FB950")
-	colorWarning  = lipgloss.Color("#D29922")
-	colorDanger   = lipgloss.Color("#F85149")
-	colorSelected = lipgloss.Color("#E6EDF3")
+	colorSurface   = lipgloss.Color("#161B22")
+	colorPanel     = lipgloss.Color("#0D1117")
+	colorPanelHi   = lipgloss.Color("#1F2937")
+	colorGlass     = lipgloss.Color("#111827")
+	colorText      = lipgloss.Color("#D6DEEB")
+	colorMuted     = lipgloss.Color("#7D8590")
+	colorAccent    = lipgloss.Color("#56B6C2")
+	colorAccent2   = lipgloss.Color("#7C3AED")
+	colorSuccess   = lipgloss.Color("#3FB950")
+	colorWarning   = lipgloss.Color("#D29922")
+	colorDanger    = lipgloss.Color("#F85149")
+	colorDangerDim = lipgloss.Color("#5A2328")
+	colorSelected  = lipgloss.Color("#E6EDF3")
 
 	titleStyle = lipgloss.NewStyle().
 			Foreground(colorSelected).
@@ -191,7 +192,7 @@ func panelStyle(width, height int, focused bool) lipgloss.Style {
 		style = style.Height(height)
 	}
 	if focused {
-		style = style.BorderForegroundBlend(colorAccent, colorAccent2)
+		style = style.BorderForeground(colorAccent)
 	}
 	return style
 }

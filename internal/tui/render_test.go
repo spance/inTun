@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/spance/intun/internal/config"
@@ -589,7 +591,7 @@ func TestViewSFTPShortcuts(t *testing.T) {
 	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "remote.txt", IsDir: false}}
 	output := m.View().Content
 	clean := stripANSI(output)
-	for _, s := range []string{"Sync", "Sync Dir", "Rename", "Preview", "Back"} {
+	for _, s := range []string{"Open", "Sync", "Sync Dir", "Rename", "Preview", "Close"} {
 		if !strings.Contains(clean, s) {
 			t.Errorf("SFTP view should contain shortcut '%s'", s)
 		}
@@ -612,6 +614,137 @@ func TestViewSFTPNoTabBar(t *testing.T) {
 	}
 	if !strings.Contains(clean, "LOCAL") || !strings.Contains(clean, "REMOTE") {
 		t.Fatal("SFTP panel labels should remain visible")
+	}
+}
+
+func TestViewSFTPTopBarKeepsSingleModeTag(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m.sftpHostLabel = "user@example.com:22"
+
+	firstLine := strings.Split(stripANSI(m.View().Content), "\n")[0]
+	if strings.Count(firstLine, "SFTP") != 1 {
+		t.Fatalf("SFTP top bar should not duplicate the mode label: %q", firstLine)
+	}
+	if !strings.Contains(firstLine, "v1.0.0") {
+		t.Fatalf("version tag should remain visible: %q", firstLine)
+	}
+}
+
+func TestRenderSFTPPanelSplitsTitleAndPath(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.sftpLocalDir = "/Users/example/projects/intun"
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "file.txt", Size: 1024}}
+
+	clean := stripANSI(m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, 48, 12, true))
+	lines := strings.Split(clean, "\n")
+
+	labelLine := -1
+	pathLine := -1
+	for i, line := range lines {
+		if strings.Contains(line, "LOCAL") && strings.Contains(line, "1 items") {
+			labelLine = i
+		}
+		if strings.Contains(line, "Users") && strings.Contains(line, "intun") {
+			pathLine = i
+		}
+	}
+	if labelLine < 0 {
+		t.Fatalf("panel should render label and item count on the title line:\n%s", clean)
+	}
+	if pathLine < 0 {
+		t.Fatalf("panel should render the current path:\n%s", clean)
+	}
+	if labelLine == pathLine {
+		t.Fatalf("panel path should be on a dedicated line, got:\n%s", clean)
+	}
+	if !strings.Contains(clean, "1-1/1") {
+		t.Fatalf("panel range should count real entries, not parent row:\n%s", clean)
+	}
+}
+
+func TestRenderSFTPEntryLineUsesSubtleCursorAndParentPath(t *testing.T) {
+	m := newTestModelWithTunnel()
+
+	clean := stripANSI(m.renderSFTPEntryLine(nil, 0, 0, 40, true))
+	if !strings.Contains(clean, "› ../") {
+		t.Fatalf("parent entry should use subtle cursor and ../ label, got %q", clean)
+	}
+	if strings.Contains(clean, "❯") {
+		t.Fatalf("entry line should not use old heavy cursor marker: %q", clean)
+	}
+	if strings.Contains(clean, "/ ..") {
+		t.Fatalf("entry line should not use old directory marker column: %q", clean)
+	}
+}
+
+func TestRenderSFTPEntryLineShowsColumnsAndFileKinds(t *testing.T) {
+	m := newTestModelWithTunnel()
+	modTime := time.Date(2026, 6, 25, 23, 9, 0, 0, time.UTC)
+	files := []sftp.FileEntry{
+		{Name: "config", IsDir: true, Mode: os.ModeDir, ModTime: modTime},
+		{Name: "current", Mode: os.ModeSymlink, ModTime: modTime},
+	}
+
+	dirLine := stripANSI(m.renderSFTPEntryLine(files, 1, 0, 72, true))
+	if !strings.Contains(dirLine, "config/") || !strings.Contains(dirLine, "DIR") || !strings.Contains(dirLine, "06-25 23:09") {
+		t.Fatalf("directory line should show name, type and modified column: %q", dirLine)
+	}
+	linkLine := stripANSI(m.renderSFTPEntryLine(files, 2, 0, 72, true))
+	if !strings.Contains(linkLine, "current") || !strings.Contains(linkLine, "LINK") {
+		t.Fatalf("symlink line should show link type token: %q", linkLine)
+	}
+}
+
+func TestRenderSFTPSelectedDetailShowsFocusedEntry(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.sftpFocus = 1
+	m.sftpRemoteDir = "/home/example"
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "remote.txt", Size: 2048, Mode: 0644}}
+	m.sftpCursor[1] = 1
+
+	clean := stripANSI(m.renderSFTPSelectedDetail(90))
+	for _, want := range []string{"REMOTE", "selected", "remote.txt", "file", "2.00 KB"} {
+		if !strings.Contains(clean, want) {
+			t.Fatalf("selected detail missing %q: %q", want, clean)
+		}
+	}
+}
+
+func TestRenderShortcutsDoesNotLeaveTrailingSeparator(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.width = 120
+	m.screen = ScreenSFTP
+
+	clean := strings.TrimSpace(stripANSI(m.renderShortcuts()))
+	if strings.HasSuffix(clean, "·") {
+		t.Fatalf("shortcut bar should not leave a trailing separator: %q", clean)
+	}
+}
+
+func TestRenderMainShortcutsFollowSelectedTunnelState(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.width = 120
+	tun := m.manager.List()[0]
+
+	running := stripANSI(m.renderShortcuts())
+	if !strings.Contains(running, "SFTP") || !strings.Contains(running, "Stop") {
+		t.Fatalf("running tunnel shortcuts should prioritize SFTP and Stop: %q", running)
+	}
+
+	tun.Status = tunnel.StatusError
+	errored := stripANSI(m.renderShortcuts())
+	if !strings.Contains(errored, "Reconnect") {
+		t.Fatalf("error tunnel shortcuts should prioritize reconnect: %q", errored)
+	}
+	if strings.Contains(errored, "SFTP") || strings.Contains(errored, "Stop") {
+		t.Fatalf("error tunnel shortcuts should hide running-only actions: %q", errored)
+	}
+
+	tun.Status = tunnel.StatusStopped
+	stopped := stripANSI(m.renderShortcuts())
+	if !strings.Contains(stopped, "Start") {
+		t.Fatalf("stopped tunnel shortcuts should show Start: %q", stopped)
 	}
 }
 
@@ -696,6 +829,22 @@ func TestRenderSFTPProgressClampsPercent(t *testing.T) {
 	clean := stripANSI(m.renderSFTPProgress(20))
 	if !strings.Contains(clean, "100%") {
 		t.Fatalf("progress should clamp over-complete transfer to 100%%, got %q", clean)
+	}
+}
+
+func TestRenderSFTPProgressFitsNarrowWidthWithLongSpeed(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.sftpDirection = "↓"
+	m.sftpProgress = sftp.NewProgressInfo("very-long-file-name-that-needs-middle-truncation.tar.gz", 100)
+	m.sftpProgress.SetDone(50)
+	m.sftpProgress.SetSpeed(123456789)
+
+	const width = 20
+	clean := stripANSI(m.renderSFTPProgress(width))
+	for _, line := range strings.Split(clean, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("progress line width = %d, want <= %d: %q", got, width, line)
+		}
 	}
 }
 

@@ -1,6 +1,11 @@
 package tui
 
-import "charm.land/lipgloss/v2"
+import (
+	"strings"
+
+	"charm.land/lipgloss/v2"
+	"github.com/spance/intun/internal/tunnel"
+)
 
 type shortcutCommand struct {
 	key   string
@@ -13,15 +18,7 @@ func (m Model) renderShortcuts() string {
 	var items []shortcutCommand
 	switch m.screen {
 	case ScreenMain:
-		items = []shortcutCommand{
-			{"↑↓", "Navigate"},
-			{"c", "Create"},
-			{"f", "SFTP"},
-			{"r", "Reconnect"},
-			{"s", "Stop/Start"},
-			{"d", "Delete"},
-			{"q", "Quit"},
-		}
+		items = m.mainShortcutCommands()
 	case ScreenSelectHost, ScreenSelectType:
 		items = []shortcutCommand{
 			{"↑↓", "Navigate"},
@@ -44,18 +41,18 @@ func (m Model) renderShortcuts() string {
 				{"Tab", "Switch"},
 				{"↑↓", "Navigate"},
 				{"●", "Transferring"},
-				{"q", "Back"},
+				{"q", "Close"},
 			}
 		} else {
 			items = []shortcutCommand{
+				{"Enter", "Open"},
 				{"Tab", "Switch"},
 				{"↑↓", "Navigate"},
-				{"Enter", "Open"},
 				{"s", "Sync"},
 				{"r", "Sync Dir"},
 				{"n", "Rename"},
 				{"v", "Preview"},
-				{"q", "Back"},
+				{"q", "Close"},
 			}
 		}
 	}
@@ -64,7 +61,8 @@ func (m Model) renderShortcuts() string {
 	for _, item := range items {
 		segments = append(segments, commandSegment(item.key, item.label))
 	}
-	body := lipgloss.JoinHorizontal(lipgloss.Center, segments...)
+	separator := lipgloss.NewStyle().Foreground(colorMuted).Render(" · ")
+	body := strings.Join(segments, separator)
 	if lipgloss.Width(body) > width {
 		body = truncateANSI(body, width)
 	}
@@ -75,6 +73,47 @@ func commandSegment(key, label string) string {
 	return lipgloss.JoinHorizontal(lipgloss.Center,
 		commandKeyStyle.Render(key),
 		commandTextStyle.Render(label),
-		lipgloss.NewStyle().Foreground(colorMuted).PaddingRight(1).Render("·"),
+	)
+}
+
+func (m Model) mainShortcutCommands() []shortcutCommand {
+	items := []shortcutCommand{{"↑↓", "Navigate"}}
+	tunnels := m.manager.List()
+	if len(tunnels) == 0 || m.selectedIndex < 0 || m.selectedIndex >= len(tunnels) {
+		return append(items,
+			shortcutCommand{"c", "Create"},
+			shortcutCommand{"q", "Quit"},
+		)
+	}
+
+	switch tunnels[m.selectedIndex].GetStatus() {
+	case tunnel.StatusRunning:
+		items = append(items,
+			shortcutCommand{"f", "SFTP"},
+			shortcutCommand{"s", "Stop"},
+			shortcutCommand{"r", "Reconnect"},
+			shortcutCommand{"d", "Delete"},
+		)
+	case tunnel.StatusStopped:
+		items = append(items,
+			shortcutCommand{"s", "Start"},
+			shortcutCommand{"d", "Delete"},
+		)
+	case tunnel.StatusError:
+		items = append(items,
+			shortcutCommand{"r", "Reconnect"},
+			shortcutCommand{"d", "Delete"},
+		)
+	case tunnel.StatusConnecting:
+		items = append(items,
+			shortcutCommand{"●", "Connecting"},
+			shortcutCommand{"d", "Delete"},
+		)
+	default:
+		items = append(items, shortcutCommand{"d", "Delete"})
+	}
+	return append(items,
+		shortcutCommand{"c", "Create"},
+		shortcutCommand{"q", "Quit"},
 	)
 }

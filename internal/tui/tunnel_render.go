@@ -27,12 +27,12 @@ func (m Model) renderTunnelSummary(width int, total int) string {
 		rx += t.DownloadBytes
 	}
 	cards := []string{
-		metricPill("ALL", fmt.Sprintf("%d", total), accentStyle),
-		metricPill("RUN", fmt.Sprintf("%d", running), successStyle),
-		metricPill("CONN", fmt.Sprintf("%d", connecting), warningStyle),
-		metricPill("ERR", fmt.Sprintf("%d", errored), dangerStyle),
-		metricPill("STOP", fmt.Sprintf("%d", stopped), mutedStyle),
-		metricPill("FLOW", formatTotal(tx, "TX")+"  "+formatTotal(rx, "RX"), accentStyle),
+		metricPill("ALL", fmt.Sprintf("%d", total), accentStyle, false),
+		metricPill("RUN", fmt.Sprintf("%d", running), successStyle, running > 0),
+		metricPill("CONN", fmt.Sprintf("%d", connecting), warningStyle, connecting > 0),
+		metricPill("ERR", fmt.Sprintf("%d", errored), dangerStyle, errored > 0),
+		metricPill("STOP", fmt.Sprintf("%d", stopped), mutedStyle, false),
+		metricPill("FLOW", formatTotal(tx, "TX")+"  "+formatTotal(rx, "RX"), accentStyle, false),
 	}
 	return lipgloss.NewStyle().
 		Width(width).
@@ -42,20 +42,28 @@ func (m Model) renderTunnelSummary(width int, total int) string {
 		Render(lipgloss.JoinHorizontal(lipgloss.Center, cards...))
 }
 
-func metricPill(label, value string, valueStyle lipgloss.Style) string {
-	return lipgloss.NewStyle().
-		Border(uiBorder()).
-		BorderForeground(colorMuted).
+func metricPill(label, value string, valueStyle lipgloss.Style, emphasized bool) string {
+	style := lipgloss.NewStyle().
+		Background(colorPanel).
 		Padding(0, 1).
-		MarginRight(1).
-		Render(eyebrowStyle.Render(label) + " " + valueStyle.Bold(true).Render(value))
+		MarginRight(1)
+	if emphasized {
+		style = style.Background(colorGlass)
+	}
+	return style.Render(eyebrowStyle.Render(label) + " " + valueStyle.Bold(true).Render(value))
 }
 
 func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) string {
 	status := tunnelStatusLabel(t)
 	borderColor := colorSurface
+	if status == "Error" {
+		borderColor = colorDangerDim
+	}
 	if focused {
 		borderColor = colorAccent
+		if status == "Error" {
+			borderColor = colorDanger
+		}
 	}
 	rowTextStyle := lipgloss.NewStyle()
 	rowMutedStyle := mutedStyle
@@ -119,8 +127,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 		Padding(0, 1).
 		MarginBottom(1)
 	if focused {
-		rowStyle = rowStyle.
-			BorderForegroundBlend(colorAccent, colorAccent2)
+		rowStyle = rowStyle.BorderForeground(borderColor)
 	}
 	_ = idx
 	return rowStyle.Render(strings.Join(lines, "\n"))

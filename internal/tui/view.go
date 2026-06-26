@@ -25,7 +25,7 @@ func (m Model) renderView() string {
 
 	var title string
 	if m.screen == ScreenSFTP {
-		title = fmt.Sprintf("inTun SFTP  %s", m.sftpHostLabel)
+		title = fmt.Sprintf("inTun  %s", m.sftpHostLabel)
 	} else {
 		title = "inTun  Interactive SSH Tunnel"
 	}

@@ -12,9 +12,10 @@ const (
 	sftpViewPaddingRows     = 1
 	sftpPanelGapRows        = 1
 	sftpPanelFrameRows      = 2
-	sftpPanelHeaderRows     = 2
+	sftpPanelHeaderRows     = 3
 	sftpPanelRowsAroundList = sftpPanelFrameRows + sftpPanelHeaderRows
-	sftpOuterChromeRows     = sftpTopBarRows + sftpShortcutRows + sftpViewPaddingRows + sftpPanelGapRows + sftpPanelRowsAroundList
+	sftpDetailRows          = 1
+	sftpOuterChromeRows     = sftpTopBarRows + sftpShortcutRows + sftpViewPaddingRows + sftpPanelGapRows + sftpDetailRows + sftpPanelRowsAroundList
 	sftpMinListRows         = 5
 	sftpRenameDrawerRows    = 3
 	sftpTransferDrawerRows  = 4
