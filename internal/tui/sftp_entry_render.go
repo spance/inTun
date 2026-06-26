@@ -11,6 +11,7 @@ import (
 
 type sftpEntryView struct {
 	name     string
+	perm     string
 	meta     string
 	modified string
 	kind     string
@@ -32,6 +33,7 @@ func sftpEntryViewAt(files []sftp.FileEntry, index int) (sftpEntryView, bool) {
 	}
 	return sftpEntryView{
 		name:     name,
+		perm:     sftpEntryPerm(entry),
 		meta:     sftpEntryMeta(entry),
 		modified: formatSFTPModTime(entry.ModTime),
 		kind:     sftp.FileEntryKind(entry),
@@ -44,11 +46,17 @@ func renderSFTPEntryColumns(entry sftpEntryView, width int) string {
 		return ""
 	}
 	meta := entry.meta
+	perm := entry.perm
 	modified := entry.modified
+	showPerm := perm != "" && width >= 58
 	showModified := modified != "" && width >= 46
+	permWidth := 10
 	metaWidth := 10
 	modifiedWidth := 11
 	gaps := 0
+	if showPerm {
+		gaps++
+	}
 	if meta != "" {
 		gaps++
 	}
@@ -56,6 +64,9 @@ func renderSFTPEntryColumns(entry sftpEntryView, width int) string {
 		gaps++
 	}
 	nameWidth := width - gaps
+	if showPerm {
+		nameWidth -= permWidth
+	}
 	if meta != "" {
 		nameWidth -= metaWidth
 	}
@@ -64,6 +75,7 @@ func renderSFTPEntryColumns(entry sftpEntryView, width int) string {
 	}
 	if nameWidth < 1 {
 		nameWidth = 1
+		showPerm = false
 		showModified = false
 		if meta != "" {
 			metaWidth = min(metaWidth, max(1, width-2))
@@ -77,6 +89,9 @@ func renderSFTPEntryColumns(entry sftpEntryView, width int) string {
 
 	name := truncate(entry.name, nameWidth)
 	line := fitLine(name, nameWidth)
+	if showPerm {
+		line += " " + lipgloss.NewStyle().Width(permWidth).Align(lipgloss.Left).Render(truncate(perm, permWidth))
+	}
 	if meta != "" {
 		line += " " + lipgloss.NewStyle().Width(metaWidth).Align(lipgloss.Right).Render(truncate(meta, metaWidth))
 	}
@@ -100,6 +115,9 @@ func renderSFTPSelectedDetail(panel, dir string, files []sftp.FileEntry, cursor,
 	}
 
 	parts := []string{entry.kind}
+	if entry.perm != "" {
+		parts = append(parts, entry.perm)
+	}
 	if entry.meta != "" && !entry.isDir {
 		parts = append(parts, entry.meta)
 	}
@@ -111,6 +129,13 @@ func renderSFTPSelectedDetail(panel, dir string, files []sftp.FileEntry, cursor,
 		shortcutStyle.Render(entry.name) +
 		mutedStyle.Render("  "+strings.Join(parts, "  "))
 	return fitLine(line, width)
+}
+
+func sftpEntryPerm(entry sftp.FileEntry) string {
+	if entry.Mode == 0 {
+		return ""
+	}
+	return entry.Mode.String()
 }
 
 func sftpEntryMeta(entry sftp.FileEntry) string {
@@ -162,6 +187,33 @@ func sftpPanelRangeLabel(fileCount, scroll, visible int) string {
 		end = fileCount
 	}
 	return fmt.Sprintf("%d-%d/%d", start, end, fileCount)
+}
+
+func renderSFTPScrollMarker(row, visible, total, scroll int, focused bool) string {
+	if visible <= 0 || total <= visible {
+		return " "
+	}
+	trackHeight := visible * visible / total
+	if trackHeight < 1 {
+		trackHeight = 1
+	}
+	if trackHeight > visible {
+		trackHeight = visible
+	}
+	maxScroll := total - visible
+	trackTop := 0
+	if maxScroll > 0 {
+		trackTop = scroll * (visible - trackHeight) / maxScroll
+	}
+	active := row >= trackTop && row < trackTop+trackHeight
+	if active {
+		style := accentStyle
+		if !focused {
+			style = mutedStyle
+		}
+		return style.Render("┃")
+	}
+	return lipgloss.NewStyle().Foreground(colorSurface).Render("│")
 }
 
 func formatSFTPBreadcrumb(path string, width int) string {

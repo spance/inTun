@@ -682,17 +682,40 @@ func TestRenderSFTPEntryLineShowsColumnsAndFileKinds(t *testing.T) {
 	m := newTestModelWithTunnel()
 	modTime := time.Date(2026, 6, 25, 23, 9, 0, 0, time.UTC)
 	files := []sftp.FileEntry{
-		{Name: "config", IsDir: true, Mode: os.ModeDir, ModTime: modTime},
-		{Name: "current", Mode: os.ModeSymlink, ModTime: modTime},
+		{Name: "config", IsDir: true, Mode: os.ModeDir | 0755, ModTime: modTime},
+		{Name: "current", Mode: os.ModeSymlink | 0777, ModTime: modTime},
 	}
 
 	dirLine := stripANSI(m.renderSFTPEntryLine(files, 1, 0, 72, true))
-	if !strings.Contains(dirLine, "config/") || !strings.Contains(dirLine, "DIR") || !strings.Contains(dirLine, "06-25 23:09") {
+	if !strings.Contains(dirLine, "config/") ||
+		!strings.Contains(dirLine, "drwxr-xr-x") ||
+		!strings.Contains(dirLine, "DIR") ||
+		!strings.Contains(dirLine, "06-25 23:09") {
 		t.Fatalf("directory line should show name, type and modified column: %q", dirLine)
 	}
 	linkLine := stripANSI(m.renderSFTPEntryLine(files, 2, 0, 72, true))
-	if !strings.Contains(linkLine, "current") || !strings.Contains(linkLine, "LINK") {
+	if !strings.Contains(linkLine, "current") || !strings.Contains(linkLine, "Lrwxrwxrwx") || !strings.Contains(linkLine, "LINK") {
 		t.Fatalf("symlink line should show link type token: %q", linkLine)
+	}
+}
+
+func TestRenderSFTPPanelShowsInternalScrollMarker(t *testing.T) {
+	m := newTestModelWithTunnel()
+	files := make([]sftp.FileEntry, 20)
+	for i := range files {
+		files[i] = sftp.FileEntry{Name: fmt.Sprintf("file-%02d.txt", i), Size: int64(i + 1), Mode: 0644}
+	}
+	m.sftpScroll[0] = 6
+	m.sftpCursor[0] = 7
+
+	clean := stripANSI(m.renderSFTPPanel("LOCAL", "/tmp", files, 0, 52, 10, true))
+	if !strings.Contains(clean, "┃") {
+		t.Fatalf("long SFTP panel should render an internal scroll marker:\n%s", clean)
+	}
+	for _, line := range strings.Split(clean, "\n") {
+		if got := lipgloss.Width(line); got > 52 {
+			t.Fatalf("panel line width = %d, want <= 52: %q", got, line)
+		}
 	}
 }
 
@@ -704,7 +727,7 @@ func TestRenderSFTPSelectedDetailShowsFocusedEntry(t *testing.T) {
 	m.sftpCursor[1] = 1
 
 	clean := stripANSI(m.renderSFTPSelectedDetail(90))
-	for _, want := range []string{"REMOTE", "selected", "remote.txt", "file", "2.00 KB"} {
+	for _, want := range []string{"REMOTE", "selected", "remote.txt", "file", "-rw-r--r--", "2.00 KB"} {
 		if !strings.Contains(clean, want) {
 			t.Fatalf("selected detail missing %q: %q", want, clean)
 		}
@@ -863,6 +886,30 @@ func TestViewSFTPLayoutFitsNarrowWidth(t *testing.T) {
 		if got := lipgloss.Width(line); got > 80 {
 			t.Fatalf("SFTP view line width = %d, want <= 80: %q", got, line)
 		}
+	}
+}
+
+func TestRenderTunnelSummaryFitsWidth(t *testing.T) {
+	m := newTestModelWithTunnel()
+	tun := m.manager.List()[0]
+	tun.UpdateStats(1024, 2048, 100, 200, 50*time.Millisecond, true)
+
+	clean := stripANSI(m.renderTunnelSummary(80, 1))
+	for _, line := range strings.Split(clean, "\n") {
+		if got := lipgloss.Width(line); got > 80 {
+			t.Fatalf("summary line width = %d, want <= 80: %q", got, line)
+		}
+	}
+}
+
+func TestRenderTunnelFlowLineSuspendsWhenNotRunning(t *testing.T) {
+	tun := &tunnel.Tunnel{Status: tunnel.StatusError, Error: "failed"}
+	clean := stripANSI(renderTunnelFlowLine(tun, []int64{1, 2, 3}, 40))
+	if !strings.Contains(clean, "flow paused") {
+		t.Fatalf("error tunnel should show paused flow state: %q", clean)
+	}
+	if strings.Contains(clean, "▁") || strings.Contains(clean, "·") {
+		t.Fatalf("error tunnel should not render a live flow graph: %q", clean)
 	}
 }
 

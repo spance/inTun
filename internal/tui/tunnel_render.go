@@ -32,14 +32,27 @@ func (m Model) renderTunnelSummary(width int, total int) string {
 		metricPill("CONN", fmt.Sprintf("%d", connecting), warningStyle, connecting > 0),
 		metricPill("ERR", fmt.Sprintf("%d", errored), dangerStyle, errored > 0),
 		metricPill("STOP", fmt.Sprintf("%d", stopped), mutedStyle, false),
-		metricPill("FLOW", formatTotal(tx, "TX")+"  "+formatTotal(rx, "RX"), accentStyle, false),
+	}
+	left := lipgloss.JoinHorizontal(lipgloss.Center, cards...)
+	right := metricPill("FLOW", formatTotal(tx, "TX")+"  "+formatTotal(rx, "RX"), accentStyle, false)
+	innerWidth := width - 2
+	if innerWidth < 1 {
+		innerWidth = width
+	}
+	gapWidth := innerWidth - lipgloss.Width(left) - lipgloss.Width(right)
+	if gapWidth < 1 {
+		gapWidth = 1
+	}
+	body := left + strings.Repeat(" ", gapWidth) + right
+	if lipgloss.Width(body) > innerWidth {
+		body = truncateANSI(body, innerWidth)
 	}
 	return lipgloss.NewStyle().
 		Width(width).
 		Border(uiBorder(), false, false, true, false).
 		BorderForeground(colorMuted).
 		PaddingBottom(1).
-		Render(lipgloss.JoinHorizontal(lipgloss.Center, cards...))
+		Render(body)
 }
 
 func metricPill(label, value string, valueStyle lipgloss.Style, emphasized bool) string {
@@ -115,7 +128,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	secondLeft := rowAccentStyle.Render(typeLabel) + rowTextStyle.Render("  ") + rowTextStyle.Render(truncate(route, leftWidth-lipgloss.Width(typeLabel)-2))
 	rightRendered := rowMutedStyle.Width(rightWidth).Render(secondRight)
 	second := fitLine(secondLeft, leftWidth) + " " + rightRendered
-	flow := renderTrafficFlow(m.trafficHist[t.ID], textW)
+	flow := renderTunnelFlowLine(t, m.trafficHist[t.ID], textW)
 	lines := []string{first, second, flow}
 	if t.Status == tunnel.StatusError && t.Error != "" {
 		lines = append(lines, renderTunnelErrorHint(t, textW-2)...)
@@ -131,6 +144,19 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	}
 	_ = idx
 	return rowStyle.Render(strings.Join(lines, "\n"))
+}
+
+func renderTunnelFlowLine(t *tunnel.Tunnel, history []int64, width int) string {
+	switch t.GetStatus() {
+	case tunnel.StatusRunning, tunnel.StatusConnecting:
+		return renderTrafficFlow(history, width)
+	case tunnel.StatusError:
+		return dangerStyle.Render(fitLine("flow paused  reconnect available", width))
+	case tunnel.StatusStopped:
+		return mutedStyle.Render(fitLine("flow stopped", width))
+	default:
+		return mutedStyle.Render(fitLine("flow unavailable", width))
+	}
 }
 
 func renderTrafficFlow(history []int64, width int) string {

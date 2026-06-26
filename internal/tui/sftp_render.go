@@ -81,12 +81,18 @@ func (m Model) renderSFTPPanel(label, dir string, files []sftp.FileEntry, panelI
 
 	renderIdx := 0
 	for i := scroll; i < totalEntries && renderIdx < visibleHeight; i++ {
-		b.WriteString(m.renderSFTPEntryLine(files, i, cursor, width, focused))
+		marker := renderSFTPScrollMarker(renderIdx, visibleHeight, totalEntries, scroll, focused)
+		b.WriteString(m.renderSFTPEntryLine(files, i, cursor, max(1, width-2), focused))
+		b.WriteString(" ")
+		b.WriteString(marker)
 		b.WriteString("\n")
 		renderIdx++
 	}
 	for renderIdx < visibleHeight {
-		b.WriteString(mutedStyle.Render(strings.Repeat(" ", max(1, width-4))))
+		marker := renderSFTPScrollMarker(renderIdx, visibleHeight, totalEntries, scroll, focused)
+		b.WriteString(mutedStyle.Render(strings.Repeat(" ", max(1, width-6))))
+		b.WriteString(" ")
+		b.WriteString(marker)
 		b.WriteString("\n")
 		renderIdx++
 	}
