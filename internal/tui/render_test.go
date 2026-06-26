@@ -91,17 +91,17 @@ func TestTunnelRouteTextExplainsEndpointDirection(t *testing.T) {
 		{
 			name: "local forward",
 			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Local, LocalPort: "9090", RemotePort: "22"},
-			want: "THIS MACHINE 127.0.0.1:9090 -> REMOTE HOST 127.0.0.1:22",
+			want: "127.0.0.1:9090 -> REMOTE 127.0.0.1:22",
 		},
 		{
 			name: "remote forward",
 			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Remote, LocalPort: "127.0.0.1:22", RemotePort: "0.0.0.0:9090"},
-			want: "REMOTE HOST 0.0.0.0:9090 -> THIS MACHINE 127.0.0.1:22",
+			want: "0.0.0.0:9090 -> LOCAL 127.0.0.1:22",
 		},
 		{
 			name: "dynamic forward",
 			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Dynamic, LocalPort: "1080"},
-			want: "THIS MACHINE 127.0.0.1:1080 -> SSH SOCKS5",
+			want: "127.0.0.1:1080 -> SOCKS5",
 		},
 	}
 
@@ -111,6 +111,16 @@ func TestTunnelRouteTextExplainsEndpointDirection(t *testing.T) {
 				t.Fatalf("tunnelRouteText() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRenderTunnelRouteTextHighlightsEndpointLabels(t *testing.T) {
+	rendered := renderTunnelRouteText("127.0.0.1:9090 -> REMOTE 127.0.0.1:22")
+	if !ansiRegex.MatchString(rendered) {
+		t.Fatal("endpoint labels should be highlighted")
+	}
+	if clean := stripANSI(rendered); clean != "127.0.0.1:9090 -> REMOTE 127.0.0.1:22" {
+		t.Fatalf("rendered route changed visible text: %q", clean)
 	}
 }
 

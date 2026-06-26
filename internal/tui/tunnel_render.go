@@ -122,7 +122,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	if routeWidth < 1 {
 		routeWidth = 1
 	}
-	secondLeft := rowAccentStyle.Render(typeLabel) + rowTextStyle.Render("  ") + rowTextStyle.Render(truncateMiddle(route, routeWidth))
+	secondLeft := rowAccentStyle.Render(typeLabel) + rowTextStyle.Render("  ") + renderTunnelRouteText(truncateMiddle(route, routeWidth))
 	rightRendered := rowMutedStyle.Width(rightWidth).Render(secondRight)
 	second := fitLine(secondLeft, leftWidth) + " " + rightRendered
 	flow := renderTunnelFlowLine(t, m.trafficHist[t.ID], textW)
@@ -148,14 +148,36 @@ func tunnelRouteText(t *tunnel.Tunnel) string {
 	remote := formatTunnelAddr(t.RemotePort)
 	switch t.Type {
 	case tunnel.Local:
-		return fmt.Sprintf("THIS MACHINE %s -> REMOTE HOST %s", local, remote)
+		return fmt.Sprintf("%s -> REMOTE %s", local, remote)
 	case tunnel.Remote:
-		return fmt.Sprintf("REMOTE HOST %s -> THIS MACHINE %s", remote, local)
+		return fmt.Sprintf("%s -> LOCAL %s", remote, local)
 	case tunnel.Dynamic:
-		return fmt.Sprintf("THIS MACHINE %s -> SSH SOCKS5", local)
+		return fmt.Sprintf("%s -> SOCKS5", local)
 	default:
 		return fmt.Sprintf("%s -> %s", local, remote)
 	}
+}
+
+func renderTunnelRouteText(route string) string {
+	highlight := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	var b strings.Builder
+	for i := 0; i < len(route); {
+		switch {
+		case strings.HasPrefix(route[i:], "LOCAL"):
+			b.WriteString(highlight.Render("LOCAL"))
+			i += len("LOCAL")
+		case strings.HasPrefix(route[i:], "REMOTE"):
+			b.WriteString(highlight.Render("REMOTE"))
+			i += len("REMOTE")
+		case strings.HasPrefix(route[i:], "SOCKS5"):
+			b.WriteString(highlight.Render("SOCKS5"))
+			i += len("SOCKS5")
+		default:
+			b.WriteByte(route[i])
+			i++
+		}
+	}
+	return b.String()
 }
 
 func renderTunnelFlowLine(t *tunnel.Tunnel, history []int64, width int) string {
