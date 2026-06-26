@@ -363,6 +363,27 @@ func TestAllowLocalDirectoryTargetSkipsNonDirectories(t *testing.T) {
 	if report.SkippedCount != 1 || !strings.Contains(report.Skipped[0].Reason, "target exists as file") {
 		t.Fatalf("skip report = %#v, want target exists as file", report)
 	}
+
+	report = TransferReport{}
+	dirTarget := filepath.Join(tmpDir, "dir")
+	if err := os.Mkdir(dirTarget, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !allowLocalDirectoryTarget(dirTarget, &report) {
+		t.Fatal("existing directory target should be accepted")
+	}
+	if report.HasSkipped() {
+		t.Fatalf("directory target should not report skipped entries: %#v", report)
+	}
+
+	report = TransferReport{}
+	missingTarget := filepath.Join(tmpDir, "missing")
+	if !allowLocalDirectoryTarget(missingTarget, &report) {
+		t.Fatal("missing target should be accepted")
+	}
+	if report.HasSkipped() {
+		t.Fatalf("missing target should not report skipped entries: %#v", report)
+	}
 }
 
 func TestCopyWithContextCancelsBetweenChunks(t *testing.T) {
@@ -382,5 +403,91 @@ func TestCopyWithContextCancelsBetweenChunks(t *testing.T) {
 	}
 	if dst.Len() >= 96*1024 {
 		t.Fatalf("copy should stop before full input, copied %d", dst.Len())
+	}
+}
+
+func TestWalkLocalTreeStopsWhenContextCanceled(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	visited := false
+	err := walkLocalTree(ctx, tmpDir, func(string, os.FileInfo) error {
+		visited = true
+		return nil
+	}, nil)
+	if err != context.Canceled {
+		t.Fatalf("walkLocalTree error = %v, want context.Canceled", err)
+	}
+	if visited {
+		t.Fatal("walkLocalTree should not visit entries after cancellation")
+	}
+}
+
+func TestWalkLocalTreeSkipsDirectoryWhenEntryRequestsSkipDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "skip-me")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "child.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var visited []string
+	err := walkLocalTree(context.Background(), tmpDir, func(path string, info os.FileInfo) error {
+		visited = append(visited, filepath.Base(path))
+		if info.IsDir() && path == subDir {
+			return filepath.SkipDir
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range visited {
+		if name == "child.txt" {
+			t.Fatalf("child inside skipped directory was visited: %v", visited)
+		}
+	}
+}
+
+func TestTransferReportLocalWalkErrorRecordsAndSkipsDirectory(t *testing.T) {
+	var report TransferReport
+	errHandler := transferReportLocalWalkError(&report)
+	dirInfo := modeInfo{mode: os.ModeDir, dir: true}
+
+	err := errHandler("/private", dirInfo, os.ErrPermission)
+	if err != filepath.SkipDir {
+		t.Fatalf("directory error should request SkipDir, got %v", err)
+	}
+	if report.SkippedCount != 1 || !strings.Contains(report.Skipped[0].Reason, "permission") {
+		t.Fatalf("skip report = %#v, want permission detail", report)
+	}
+}
+
+func TestNonRegularFileReasonClassifiesCommonTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode fs.FileMode
+		want string
+	}{
+		{name: "symlink", mode: os.ModeSymlink, want: "symbolic link"},
+		{name: "socket", mode: os.ModeSocket, want: "socket"},
+		{name: "device", mode: os.ModeDevice, want: "device file"},
+		{name: "named-pipe", mode: os.ModeNamedPipe, want: "named pipe"},
+		{name: "irregular", mode: os.ModeIrregular, want: "irregular file"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nonRegularFileReason(modeInfo{mode: tt.mode})
+			if got != tt.want {
+				t.Fatalf("nonRegularFileReason(%v) = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
 	}
 }

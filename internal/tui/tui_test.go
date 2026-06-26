@@ -29,6 +29,10 @@ func keyEsc() tea.KeyMsg {
 	return tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc})
 }
 
+func keyTab() tea.KeyMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyTab})
+}
+
 func keyDown() tea.KeyMsg {
 	return tea.KeyPressMsg(tea.Key{Code: tea.KeyDown})
 }
@@ -864,6 +868,139 @@ func TestValidateSingleSyncSourceRejectsLocalSymlink(t *testing.T) {
 	}
 	if !strings.Contains(got.statusMsg, "symbolic link") {
 		t.Fatalf("statusMsg = %q, want symbolic link skip reason", got.statusMsg)
+	}
+}
+
+func TestSFTPKeyFlowSwitchesFocusAndMovesOnlyActivePanel(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "local.txt"}}
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "remote.txt"}}
+	m.sftpFocus = 0
+
+	m = updateModel(m, keyTab())
+	if m.sftpFocus != 1 {
+		t.Fatalf("Tab should switch focus to remote panel, got %d", m.sftpFocus)
+	}
+
+	m = updateModel(m, keyDown())
+	if m.sftpCursor[1] != 1 {
+		t.Fatalf("remote cursor = %d, want 1", m.sftpCursor[1])
+	}
+	if m.sftpCursor[0] != 0 {
+		t.Fatalf("local cursor should not move while remote is focused, got %d", m.sftpCursor[0])
+	}
+}
+
+func TestSFTPKeyFlowBlocksActionsDuringTransfer(t *testing.T) {
+	tests := []struct {
+		key       tea.KeyMsg
+		fieldName string
+	}{
+		{key: keyMsg("s"), fieldName: "sync"},
+		{key: keyMsg("r"), fieldName: "sync-dir"},
+		{key: keyMsg("v"), fieldName: "preview"},
+		{key: keyMsg("n"), fieldName: "rename"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fieldName, func(t *testing.T) {
+			m := newTestModel(nil)
+			m.screen = ScreenSFTP
+			m.sftpTransferring = true
+			m.sftpLocalFiles = []sftp.FileEntry{{Name: "file.txt", Size: 1}}
+			m.sftpCursor[0] = 1
+
+			m = updateModel(m, tt.key)
+
+			if !strings.Contains(m.statusMsg, "Wait for transfer") {
+				t.Fatalf("statusMsg = %q, want transfer guard", m.statusMsg)
+			}
+			if m.sftpRenaming {
+				t.Fatal("rename mode should not start during transfer")
+			}
+			if m.sftpPreviewing {
+				t.Fatal("preview should not open during transfer")
+			}
+		})
+	}
+}
+
+func TestSFTPConfirmCancelClearsPendingState(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpOverwriteConfirm = true
+	m.sftpOverwriteConfirmMsg = "overwrite?"
+	m.sftpPendingSync = sftpPendingSync{source: "/tmp/source", target: "/tmp/target"}
+
+	m = updateModel(m, keyEsc())
+
+	if m.sftpOverwriteConfirm || m.sftpOverwriteConfirmMsg != "" || m.sftpPendingSync != (sftpPendingSync{}) {
+		t.Fatalf("overwrite cancel should clear modal state: %#v", m)
+	}
+
+	m.sftpSyncConfirm = true
+	m.sftpSyncConfirmMsg = "sync?"
+	m = updateModel(m, keyEsc())
+	if m.sftpSyncConfirm || m.sftpSyncConfirmMsg != "" {
+		t.Fatalf("sync cancel should clear modal state: confirm=%v msg=%q", m.sftpSyncConfirm, m.sftpSyncConfirmMsg)
+	}
+}
+
+func TestSFTPDirectoryConfirmEnterClearsModalWithoutSelection(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpSyncConfirm = true
+	m.sftpSyncConfirmMsg = "confirm"
+	m.sftpFocus = 0
+	m.sftpCursor[0] = 0
+
+	m = updateModel(m, keyEnter())
+
+	if m.sftpSyncConfirm || m.sftpSyncConfirmMsg != "" {
+		t.Fatalf("confirm enter should clear modal state: confirm=%v msg=%q", m.sftpSyncConfirm, m.sftpSyncConfirmMsg)
+	}
+	if m.sftpTransferring {
+		t.Fatal("empty directory selection should not start transfer")
+	}
+}
+
+func TestSFTPRenameInputEditsAndEscCancels(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpRenaming = true
+	m.sftpRenameInput = "old"
+
+	m = updateModel(m, keyMsg("x"))
+	if m.sftpRenameInput != "oldx" {
+		t.Fatalf("rename input = %q, want oldx", m.sftpRenameInput)
+	}
+
+	m = updateModel(m, keyBackspace())
+	if m.sftpRenameInput != "old" {
+		t.Fatalf("rename input after backspace = %q, want old", m.sftpRenameInput)
+	}
+
+	m = updateModel(m, keyEsc())
+	if m.sftpRenaming || m.sftpRenameInput != "" {
+		t.Fatalf("Esc should cancel rename input, renaming=%v input=%q", m.sftpRenaming, m.sftpRenameInput)
+	}
+}
+
+func TestSFTPStartSyncRejectsDirectoryBeforeClientUse(t *testing.T) {
+	m := newTestModel(nil)
+	m.screen = ScreenSFTP
+	m.sftpFocus = 0
+	m.sftpCursor[0] = 1
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "dir", IsDir: true}}
+
+	m = updateModel(m, keyMsg("s"))
+
+	if !strings.Contains(m.statusMsg, "Use [r] for directory sync") {
+		t.Fatalf("statusMsg = %q, want directory sync hint", m.statusMsg)
+	}
+	if m.sftpTransferring {
+		t.Fatal("directory selected with file sync should not start transfer")
 	}
 }
 

@@ -667,6 +667,56 @@ func TestViewSFTPRenameInput(t *testing.T) {
 	}
 }
 
+func TestRenderSFTPEntryLineFitsWidthWithLargeSize(t *testing.T) {
+	m := newTestModelWithTunnel()
+	width := 24
+	line := m.renderSFTPEntryLine(
+		[]sftp.FileEntry{{Name: "very-long-file-name-that-needs-truncation.bin", Size: 123456789}},
+		1,
+		1,
+		width,
+		true,
+	)
+	clean := stripANSI(line)
+
+	if got, wantMax := lipgloss.Width(clean), width-4; got > wantMax {
+		t.Fatalf("entry line width = %d, want <= %d: %q", got, wantMax, clean)
+	}
+	if !strings.Contains(clean, "MB") {
+		t.Fatalf("entry line should keep size visible, got %q", clean)
+	}
+}
+
+func TestRenderSFTPProgressClampsPercent(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.sftpDirection = "↑"
+	m.sftpProgress = sftp.NewProgressInfo("file.txt", 10)
+	m.sftpProgress.SetDone(20)
+
+	clean := stripANSI(m.renderSFTPProgress(20))
+	if !strings.Contains(clean, "100%") {
+		t.Fatalf("progress should clamp over-complete transfer to 100%%, got %q", clean)
+	}
+}
+
+func TestViewSFTPLayoutFitsNarrowWidth(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m.width = 80
+	m.height = 20
+	m.sftpLocalDir = "/Users/example/projects/a-very-long-local-directory-name"
+	m.sftpRemoteDir = "/home/example/a-very-long-remote-directory-name"
+	m.sftpLocalFiles = []sftp.FileEntry{{Name: "very-long-local-file-name-that-needs-truncation.bin", Size: 987654321}}
+	m.sftpRemoteFiles = []sftp.FileEntry{{Name: "very-long-remote-file-name-that-needs-truncation.bin", Size: 123456789}}
+
+	clean := stripANSI(m.View().Content)
+	for _, line := range strings.Split(clean, "\n") {
+		if got := lipgloss.Width(line); got > 80 {
+			t.Fatalf("SFTP view line width = %d, want <= 80: %q", got, line)
+		}
+	}
+}
+
 func TestViewConnectingTunnel(t *testing.T) {
 	m := newTestModelWithTunnel()
 	tun := m.manager.List()[0]

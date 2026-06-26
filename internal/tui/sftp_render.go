@@ -124,23 +124,32 @@ func (m Model) renderSFTPEntryLine(files []sftp.FileEntry, i, cursor, width int,
 		marker = "/"
 	}
 
+	targetWidth := max(1, width-4)
+	leading := prefix + marker + " "
+	leadingWidth := lipgloss.Width(leading)
+
 	var line string
 	if sizeStr != "" {
-		nameWidth := width - 8 - len(sizeStr)
-		if nameWidth < 5 {
-			nameWidth = 5
+		sizeWidth := lipgloss.Width(sizeStr)
+		if sizeWidth > targetWidth-leadingWidth-2 {
+			sizeStr = truncate(sizeStr, max(1, targetWidth-leadingWidth-2))
+			sizeWidth = lipgloss.Width(sizeStr)
+		}
+		nameWidth := targetWidth - leadingWidth - sizeWidth - 1
+		if nameWidth < 1 {
+			nameWidth = 1
 		}
 		truncated := truncate(displayName, nameWidth)
-		padLen := width - 8 - lipgloss.Width(truncated) - len(sizeStr)
-		if padLen < 1 {
-			padLen = 1
+		padLen := targetWidth - leadingWidth - lipgloss.Width(truncated) - sizeWidth
+		if padLen < 0 {
+			padLen = 0
 		}
-		line = prefix + marker + " " + truncated + strings.Repeat(" ", padLen) + sizeStr
+		line = leading + truncated + strings.Repeat(" ", padLen) + sizeStr
 	} else {
-		line = prefix + marker + " " + truncate(displayName, width-8)
+		line = leading + truncate(displayName, targetWidth-leadingWidth)
 	}
 
-	linePad := width - 4 - lipgloss.Width(line)
+	linePad := targetWidth - lipgloss.Width(line)
 	if linePad > 0 {
 		line += strings.Repeat(" ", linePad)
 	}
