@@ -199,7 +199,7 @@ func formatTunnelAddr(addr string) string {
 	if strings.Contains(addr, ":") {
 		return addr
 	}
-	return ":" + addr
+	return "127.0.0.1:" + addr
 }
 
 func validPortInput(input string, allowAddr bool) bool {

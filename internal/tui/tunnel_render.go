@@ -82,13 +82,6 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	rowMutedStyle := mutedStyle
 	rowAccentStyle := accentStyle
 	rowSelectedStyle := selectedStyle
-	local := formatTunnelAddr(t.LocalPort)
-	remote := "-"
-	if t.Type == tunnel.Dynamic {
-		remote = "SOCKS5"
-	} else if t.RemotePort != "" {
-		remote = formatTunnelAddr(t.RemotePort)
-	}
 	latency := "-"
 	if t.Latency > 0 {
 		latency = fmt.Sprintf("%dms", t.Latency.Milliseconds())
@@ -123,9 +116,13 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	if leftWidth < 12 {
 		leftWidth = 12
 	}
-	route := fmt.Sprintf("%s → %s", local, remote)
+	route := tunnelRouteText(t)
 	typeLabel := tunnelTypeLabel(t.Type)
-	secondLeft := rowAccentStyle.Render(typeLabel) + rowTextStyle.Render("  ") + rowTextStyle.Render(truncate(route, leftWidth-lipgloss.Width(typeLabel)-2))
+	routeWidth := leftWidth - lipgloss.Width(typeLabel) - 2
+	if routeWidth < 1 {
+		routeWidth = 1
+	}
+	secondLeft := rowAccentStyle.Render(typeLabel) + rowTextStyle.Render("  ") + rowTextStyle.Render(truncateMiddle(route, routeWidth))
 	rightRendered := rowMutedStyle.Width(rightWidth).Render(secondRight)
 	second := fitLine(secondLeft, leftWidth) + " " + rightRendered
 	flow := renderTunnelFlowLine(t, m.trafficHist[t.ID], textW)
@@ -144,6 +141,21 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	}
 	_ = idx
 	return rowStyle.Render(strings.Join(lines, "\n"))
+}
+
+func tunnelRouteText(t *tunnel.Tunnel) string {
+	local := formatTunnelAddr(t.LocalPort)
+	remote := formatTunnelAddr(t.RemotePort)
+	switch t.Type {
+	case tunnel.Local:
+		return fmt.Sprintf("THIS MACHINE %s -> REMOTE HOST %s", local, remote)
+	case tunnel.Remote:
+		return fmt.Sprintf("REMOTE HOST %s -> THIS MACHINE %s", remote, local)
+	case tunnel.Dynamic:
+		return fmt.Sprintf("THIS MACHINE %s -> SSH SOCKS5", local)
+	default:
+		return fmt.Sprintf("%s -> %s", local, remote)
+	}
 }
 
 func renderTunnelFlowLine(t *tunnel.Tunnel, history []int64, width int) string {

@@ -81,6 +81,39 @@ func TestViewTunnelList(t *testing.T) {
 	}
 }
 
+func TestTunnelRouteTextExplainsEndpointDirection(t *testing.T) {
+	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
+	tests := []struct {
+		name string
+		tun  *tunnel.Tunnel
+		want string
+	}{
+		{
+			name: "local forward",
+			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Local, LocalPort: "9090", RemotePort: "22"},
+			want: "THIS MACHINE 127.0.0.1:9090 -> REMOTE HOST 127.0.0.1:22",
+		},
+		{
+			name: "remote forward",
+			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Remote, LocalPort: "127.0.0.1:22", RemotePort: "0.0.0.0:9090"},
+			want: "REMOTE HOST 0.0.0.0:9090 -> THIS MACHINE 127.0.0.1:22",
+		},
+		{
+			name: "dynamic forward",
+			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Dynamic, LocalPort: "1080"},
+			want: "THIS MACHINE 127.0.0.1:1080 -> SSH SOCKS5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tunnelRouteText(tt.tun); got != tt.want {
+				t.Fatalf("tunnelRouteText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestViewDoesNotPrefixHostPortAddressWithExtraColon(t *testing.T) {
 	m := newTestModelWithTunnel()
 	tun := m.manager.List()[0]
