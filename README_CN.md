@@ -7,6 +7,10 @@ Interactive SSH Tunnel - 跨平台 SSH 隧道管理器，基于纯 Go 实现，�
 [![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+## 界面预览
+
+![inTun 交互式 SSH 隧道 TUI 预览](docs/assets/intun-preview.webp)
+
 ## 功能特性
 
 - **三种隧道模式**：本地端口转发 (-L)、远程端口转发 (-R)、动态 SOCKS 代理 (-D)

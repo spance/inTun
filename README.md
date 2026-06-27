@@ -7,6 +7,10 @@ Interactive SSH Tunnel - A cross-platform SSH tunnel manager with a rich TUI int
 [![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+## Preview
+
+![inTun interactive SSH tunnel TUI preview](docs/assets/intun-preview.webp)
+
 ## Features
 
 - **Three Tunnel Modes**: Local port forwarding (-L), Remote port forwarding (-R), Dynamic SOCKS proxy (-D)
