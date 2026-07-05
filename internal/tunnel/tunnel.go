@@ -119,13 +119,16 @@ func (m *Manager) startTunnel(t *Tunnel) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
-	t.Conn = conn
-	if !conn.IsRunning() {
-		errMsg := conn.Error()
+	t.setConnection(conn)
+	if conn.IsRunning() {
+		t.setStatus(StatusRunning, "")
+		return nil
+	}
+	if errMsg := conn.Error(); errMsg != "" {
 		t.setStatus(StatusError, errMsg)
 		return fmt.Errorf("connection failed immediately: %s", errMsg)
 	}
-	t.setStatus(StatusRunning, "")
+	t.setStatus(StatusConnecting, "")
 	return nil
 }
 
@@ -135,8 +138,8 @@ func (m *Manager) Stop(id int) error {
 
 	for _, t := range m.Tunnels {
 		if t.ID == id {
-			if t.Conn != nil {
-				t.Conn.Stop()
+			if conn := t.getConnection(); conn != nil {
+				conn.Stop()
 			}
 			t.setStatus(StatusStopped, "")
 			return nil
@@ -149,8 +152,8 @@ func (m *Manager) Restart(id int) error {
 	m.mu.Lock()
 	for _, t := range m.Tunnels {
 		if t.ID == id {
-			if t.Conn != nil {
-				t.Conn.Stop()
+			if conn := t.getConnection(); conn != nil {
+				conn.Stop()
 			}
 			m.mu.Unlock()
 
@@ -176,8 +179,8 @@ func (m *Manager) Delete(id int) error {
 
 	for i, t := range m.Tunnels {
 		if t.ID == id {
-			if t.Conn != nil {
-				t.Conn.Stop()
+			if conn := t.getConnection(); conn != nil {
+				conn.Stop()
 			}
 			m.Tunnels = append(m.Tunnels[:i], m.Tunnels[i+1:]...)
 			return nil
@@ -217,13 +220,32 @@ func (t *Tunnel) UpdateStats(uploadBytes, downloadBytes, uploadSpeed, downloadSp
 }
 
 func (t *Tunnel) CheckStatus() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.Conn != nil && t.Status == StatusRunning {
-		if !t.Conn.IsRunning() {
-			t.Status = StatusError
-			t.Error = t.Conn.Error()
+	t.mu.RLock()
+	status := t.Status
+	conn := t.Conn
+	t.mu.RUnlock()
+
+	if conn == nil {
+		return
+	}
+	switch status {
+	case StatusConnecting:
+		if conn.IsRunning() {
+			t.setStatusIfCurrent(StatusConnecting, StatusRunning, "")
+			return
 		}
+		if errMsg := conn.Error(); errMsg != "" {
+			t.setStatusIfCurrent(StatusConnecting, StatusError, errMsg)
+		}
+	case StatusRunning:
+		if conn.IsRunning() {
+			return
+		}
+		errMsg := conn.Error()
+		if errMsg == "" {
+			errMsg = "connection stopped"
+		}
+		t.setStatusIfCurrent(StatusRunning, StatusError, errMsg)
 	}
 }
 
@@ -260,6 +282,33 @@ func (t *Tunnel) setStatus(status Status, errMsg string) {
 	t.mu.Unlock()
 }
 
+func (t *Tunnel) setStatusIfCurrent(current, next Status, errMsg string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.Status != current {
+		return false
+	}
+	t.Status = next
+	t.Error = errMsg
+	return true
+}
+
+func (t *Tunnel) setConnection(conn platform.Connection) {
+	t.mu.Lock()
+	t.Conn = conn
+	t.mu.Unlock()
+}
+
+func (t *Tunnel) GetConnection() platform.Connection {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.Conn
+}
+
+func (t *Tunnel) getConnection() platform.Connection {
+	return t.GetConnection()
+}
+
 func (m *Manager) GetSFTPClient(id int) (interface{}, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -269,7 +318,8 @@ func (m *Manager) GetSFTPClient(id int) (interface{}, error) {
 			if t.GetStatus() != StatusRunning {
 				return nil, fmt.Errorf("tunnel %d is not running", id)
 			}
-			sc, ok := t.Conn.(platform.SFTPCapable)
+			conn := t.getConnection()
+			sc, ok := conn.(platform.SFTPCapable)
 			if !ok {
 				return nil, fmt.Errorf("tunnel %d does not support SFTP", id)
 			}

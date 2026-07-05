@@ -102,6 +102,56 @@ func TestManagerCreateError(t *testing.T) {
 	}
 }
 
+func TestManagerCreateKeepsAsyncConnectionConnectingUntilReady(t *testing.T) {
+	conn := platform.NewMockConnection()
+	conn.SetRunning(false)
+	mockExec := platform.NewMockExecutor()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*platform.MockConnection, error) {
+		return conn, nil
+	}
+	m := newTestManager(mockExec)
+
+	tun, err := m.Create("slow", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+	if err != nil {
+		t.Fatalf("Create returned error for in-progress connection: %v", err)
+	}
+	if tun.GetStatus() != StatusConnecting {
+		t.Fatalf("initial status = %v, want Connecting", tun.GetStatus())
+	}
+
+	conn.SetRunning(true)
+	tun.CheckStatus()
+
+	if tun.GetStatus() != StatusRunning {
+		t.Fatalf("ready status = %v, want Running", tun.GetStatus())
+	}
+}
+
+func TestManagerCreateAsyncConnectionFailureBecomesError(t *testing.T) {
+	conn := platform.NewMockConnection()
+	conn.SetRunning(false)
+	mockExec := platform.NewMockExecutor()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*platform.MockConnection, error) {
+		return conn, nil
+	}
+	m := newTestManager(mockExec)
+
+	tun, err := m.Create("slow-fail", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+	if err != nil {
+		t.Fatalf("Create returned error for in-progress connection: %v", err)
+	}
+
+	conn.SetError("SSH_CONNECTION_FAILED: timeout")
+	tun.CheckStatus()
+
+	if tun.GetStatus() != StatusError {
+		t.Fatalf("failed status = %v, want Error", tun.GetStatus())
+	}
+	if !strings.Contains(tun.GetError(), "timeout") {
+		t.Fatalf("error = %q, want timeout", tun.GetError())
+	}
+}
+
 func TestManagerList(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	m := newTestManager(mockExec)

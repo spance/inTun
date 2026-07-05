@@ -18,6 +18,7 @@ type SSHConnection struct {
 	client        *ssh.Client
 	lastError     string
 	exited        bool
+	ready         bool
 	mu            sync.RWMutex
 	stopOnce      sync.Once
 	forwards      []io.Closer
@@ -53,7 +54,7 @@ func (c *SSHConnection) Stop() error {
 func (c *SSHConnection) IsRunning() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return !c.exited
+	return c.ready && !c.exited
 }
 
 func (c *SSHConnection) Error() string {
@@ -116,9 +117,18 @@ func (c *SSHConnection) setExited() {
 	c.mu.Unlock()
 }
 
+func (c *SSHConnection) setReady() {
+	c.mu.Lock()
+	if !c.exited && c.lastError == "" {
+		c.ready = true
+	}
+	c.mu.Unlock()
+}
+
 func (c *SSHConnection) setError(msg string) {
 	c.mu.Lock()
 	c.exited = true
+	c.ready = false
 	c.lastError = msg
 	c.mu.Unlock()
 }
@@ -130,6 +140,7 @@ func (c *SSHConnection) setConnectionLost(msg string) {
 		return
 	}
 	c.exited = true
+	c.ready = false
 	c.lastError = msg
 	c.mu.Unlock()
 }
@@ -252,7 +263,13 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 		e.startRemoteForward(conn, localPort, remotePort)
 	case Dynamic:
 		e.startDynamicForward(conn, localPort)
+	default:
+		conn.setError(fmt.Sprintf("UNKNOWN_TUNNEL_TYPE: %s", tunnelType))
 	}
+	if conn.Error() != "" {
+		return
+	}
+	conn.setReady()
 
 	go func() {
 		err := client.Wait()

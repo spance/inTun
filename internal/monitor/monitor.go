@@ -72,11 +72,11 @@ func (m *Monitor) updateTunnelStats(t *tunnel.Tunnel, shouldPing bool) {
 	var latency time.Duration
 	var up, down, speedUp, speedDown int64
 
-	if t.Conn != nil {
+	if conn := t.GetConnection(); conn != nil {
 		if shouldPing {
-			latency = t.Conn.Ping()
+			latency = conn.Ping()
 		}
-		up, down = t.Conn.GetStats()
+		up, down = conn.GetStats()
 
 		prev := t.GetSnapshot()
 		deltaUp := up - prev.UploadBytes

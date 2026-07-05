@@ -110,8 +110,12 @@ func TestNewExecutorReturnsSSHExecutor(t *testing.T) {
 
 func TestSSHConnectionStateHelpers(t *testing.T) {
 	conn := &SSHConnection{}
+	if conn.IsRunning() {
+		t.Fatal("new connection should not be running before it is ready")
+	}
+	conn.setReady()
 	if !conn.IsRunning() {
-		t.Fatal("new connection should be considered running until exited")
+		t.Fatal("setReady should mark connection running")
 	}
 
 	closer := &countingCloser{}
