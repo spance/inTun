@@ -94,7 +94,7 @@ func (m *MockConnection) SetPing(d time.Duration) {
 type MockExecutor struct {
 	ConnectErr       error
 	Connections      []*MockConnection
-	ConnectFn        func(cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*MockConnection, error)
+	ConnectFn        func(cfg *SSHConfig, spec ForwardSpec) (*MockConnection, error)
 	mu               sync.Mutex
 	connectCallCount int
 }
@@ -103,7 +103,7 @@ func NewMockExecutor() *MockExecutor {
 	return &MockExecutor{}
 }
 
-func (e *MockExecutor) Connect(ctx *AuthContext, cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) (Connection, error) {
+func (e *MockExecutor) Connect(ctx *AuthContext, cfg *SSHConfig, spec ForwardSpec) (Connection, error) {
 	e.mu.Lock()
 	e.connectCallCount++
 	e.mu.Unlock()
@@ -113,7 +113,7 @@ func (e *MockExecutor) Connect(ctx *AuthContext, cfg *SSHConfig, tunnelType Tunn
 	}
 
 	if e.ConnectFn != nil {
-		return e.ConnectFn(cfg, tunnelType, localPort, remotePort)
+		return e.ConnectFn(cfg, spec)
 	}
 
 	conn := NewMockConnection()

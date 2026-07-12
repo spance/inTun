@@ -72,6 +72,9 @@ func (m Model) renderView() string {
 	if m.confirmQuit {
 		return overlayCentered(content, m.renderQuitConfirmModal(width), width, height)
 	}
+	if m.pendingTunnelCreate != nil {
+		return overlayCentered(content, m.renderTunnelCreateConfirmModal(width), width, height)
+	}
 	return content
 }
 
@@ -146,7 +149,11 @@ func (m Model) renderMainScreen() string {
 
 func (m Model) renderPortInput() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Enter Port Number"))
+	title := "Enter Port Number"
+	if m.selectedProtocol == tunnel.UDP {
+		title += "  UDP"
+	}
+	b.WriteString(headerStyle.Render(title))
 	b.WriteString("\n\n")
 
 	if m.selectedType == tunnel.Dynamic {
@@ -178,9 +185,11 @@ func (m Model) renderPortInput() string {
 
 func tunnelTypeItems() []typeItem {
 	return []typeItem{
-		{name: "Local (-L)", desc: "Forward local port to remote server", t: tunnel.Local},
-		{name: "Remote (-R)", desc: "Forward remote port to local server", t: tunnel.Remote},
-		{name: "Dynamic (-D)", desc: "SOCKS proxy on local port", t: tunnel.Dynamic},
+		{name: "Local TCP (-L)", desc: "Forward a local TCP port to the remote host", t: tunnel.Local, p: tunnel.TCP},
+		{name: "Local UDP", desc: "Relay local UDP datagrams through the remote intun agent", t: tunnel.Local, p: tunnel.UDP},
+		{name: "Remote TCP (-R)", desc: "Forward a remote TCP port to this machine", t: tunnel.Remote, p: tunnel.TCP},
+		{name: "Remote UDP", desc: "Expose a remote UDP port and relay it to this machine", t: tunnel.Remote, p: tunnel.UDP},
+		{name: "Dynamic TCP (-D)", desc: "SOCKS5 TCP proxy on a local port", t: tunnel.Dynamic, p: tunnel.TCP},
 	}
 }
 

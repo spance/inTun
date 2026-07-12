@@ -1,11 +1,13 @@
 package platform
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +23,7 @@ func TestSSHExecutorConnectsAndCreatesSFTPClientWithInProcessServer(t *testing.T
 
 	t.Setenv("HOME", t.TempDir())
 	authCtx := newIntegrationAuthContext(t)
-	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), Dynamic, "127.0.0.1:0", "")
+	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), ForwardSpec{Type: Dynamic, Protocol: TCP, LocalAddr: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestSSHExecutorLocalForwardWithInProcessServer(t *testing.T) {
 
 	t.Setenv("HOME", t.TempDir())
 	authCtx := newIntegrationAuthContext(t)
-	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), Local, "127.0.0.1:0", echoAddr)
+	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), ForwardSpec{Type: Local, Protocol: TCP, LocalAddr: "127.0.0.1:0", RemoteAddr: echoAddr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +65,142 @@ func TestSSHExecutorLocalForwardWithInProcessServer(t *testing.T) {
 	listener := waitForForwardListener(t, conn)
 
 	roundTripTCP(t, listener.Addr().String(), "local-forward")
-	upload, download := conn.GetStats()
-	if upload == 0 || download == 0 {
-		t.Fatalf("forward stats upload/download = %d/%d, want non-zero", upload, download)
+	waitForNonZeroStats(t, conn)
+}
+
+func TestSSHExecutorLocalUDPForwardWithInProcessServer(t *testing.T) {
+	echoAddr := startUDPEchoServer(t)
+	server := startTestSSHServer(t, t.TempDir())
+
+	t.Setenv("HOME", t.TempDir())
+	authCtx := newIntegrationAuthContext(t)
+	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), ForwardSpec{
+		Type:       Local,
+		Protocol:   UDP,
+		LocalAddr:  "127.0.0.1:0",
+		RemoteAddr: echoAddr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connIface.(*SSHConnection)
+	t.Cleanup(func() { _ = conn.Stop() })
+	forward := waitForUDPForwardRuntime(t, conn)
+
+	for _, message := range []string{"first-datagram", "second-datagram"} {
+		client, err := net.Dial("udp", forward.listener.LocalAddr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			_ = client.Close()
+			t.Fatal(err)
+		}
+		if _, err := client.Write([]byte(message)); err != nil {
+			_ = client.Close()
+			t.Fatal(err)
+		}
+		buffer := make([]byte, 128)
+		n, err := client.Read(buffer)
+		_ = client.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(buffer[:n]) != message {
+			t.Fatalf("UDP round-trip = %q, want %q", buffer[:n], message)
+		}
+	}
+	waitForNonZeroStats(t, conn)
+}
+
+func TestSSHExecutorRemoteUDPForwardWithInProcessServer(t *testing.T) {
+	echoAddr := startUDPEchoServer(t)
+	server := startTestSSHServer(t, t.TempDir())
+
+	t.Setenv("HOME", t.TempDir())
+	authCtx := newIntegrationAuthContext(t)
+	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), ForwardSpec{
+		Type:       Remote,
+		Protocol:   UDP,
+		LocalAddr:  echoAddr,
+		RemoteAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connIface.(*SSHConnection)
+	forward := waitForUDPForwardRuntime(t, conn)
+	if forward.listener != nil {
+		t.Fatal("remote UDP forward should not own a local peer listener")
+	}
+	if forward.remoteAddr == "" || strings.HasSuffix(forward.remoteAddr, ":0") {
+		t.Fatalf("remote UDP bound address = %q, want allocated port", forward.remoteAddr)
+	}
+
+	for _, message := range []string{"remote-first", "remote-second"} {
+		client, err := net.Dial("udp", forward.remoteAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			_ = client.Close()
+			t.Fatal(err)
+		}
+		if _, err := client.Write([]byte(message)); err != nil {
+			_ = client.Close()
+			t.Fatal(err)
+		}
+		buffer := make([]byte, 128)
+		n, err := client.Read(buffer)
+		_ = client.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(buffer[:n]) != message {
+			t.Fatalf("remote UDP round-trip = %q, want %q", buffer[:n], message)
+		}
+	}
+	waitForNonZeroStats(t, conn)
+	if err := conn.Stop(); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	waitForCondition(t, func() bool {
+		addr, err := net.ResolveUDPAddr("udp", forward.remoteAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return false
+		}
+		_ = listener.Close()
+		return true
+	})
+}
+
+func TestSSHExecutorRemoteUDPBindFailureDoesNotBecomeRunning(t *testing.T) {
+	occupied, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	server := startTestSSHServer(t, t.TempDir())
+
+	t.Setenv("HOME", t.TempDir())
+	connIface, err := (&SSHExecutor{}).Connect(newIntegrationAuthContext(t), server.config(), ForwardSpec{
+		Type:       Remote,
+		Protocol:   UDP,
+		LocalAddr:  "127.0.0.1:53",
+		RemoteAddr: occupied.LocalAddr().String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connIface.(*SSHConnection)
+	t.Cleanup(func() { _ = conn.Stop() })
+	waitForConnectionError(t, conn, "UDP_RELAY_FAILED")
+	if conn.IsRunning() {
+		t.Fatal("remote UDP bind failure must not become Running")
 	}
 }
 
@@ -75,7 +210,7 @@ func TestSSHExecutorRemoteForwardWithInProcessServer(t *testing.T) {
 
 	t.Setenv("HOME", t.TempDir())
 	authCtx := newIntegrationAuthContext(t)
-	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), Remote, echoAddr, "127.0.0.1:0")
+	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), ForwardSpec{Type: Remote, Protocol: TCP, LocalAddr: echoAddr, RemoteAddr: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +219,7 @@ func TestSSHExecutorRemoteForwardWithInProcessServer(t *testing.T) {
 	listener := waitForForwardListener(t, conn)
 
 	roundTripTCP(t, listener.Addr().String(), "remote-forward")
-	upload, download := conn.GetStats()
-	if upload == 0 || download == 0 {
-		t.Fatalf("remote stats upload/download = %d/%d, want non-zero", upload, download)
-	}
+	waitForNonZeroStats(t, conn)
 }
 
 func TestSSHExecutorDynamicForwardWithInProcessServer(t *testing.T) {
@@ -104,7 +236,7 @@ func TestSSHExecutorDynamicForwardWithInProcessServer(t *testing.T) {
 
 	t.Setenv("HOME", t.TempDir())
 	authCtx := newIntegrationAuthContext(t)
-	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), Dynamic, "127.0.0.1:0", "")
+	connIface, err := (&SSHExecutor{}).Connect(authCtx, server.config(), ForwardSpec{Type: Dynamic, Protocol: TCP, LocalAddr: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +288,13 @@ func TestSSHExecutorDynamicForwardWithInProcessServer(t *testing.T) {
 	if string(buf) != "dynamic-forward" {
 		t.Fatalf("SOCKS round-trip = %q, want dynamic-forward", string(buf))
 	}
-	upload, download := conn.GetStats()
-	if upload == 0 || download == 0 {
-		t.Fatalf("dynamic stats upload/download = %d/%d, want non-zero", upload, download)
-	}
+	waitForNonZeroStats(t, conn)
+}
+
+func waitForNonZeroStats(t *testing.T, conn *SSHConnection) {
+	t.Helper()
+	waitForCondition(t, func() bool {
+		upload, download := conn.GetStats()
+		return upload > 0 && download > 0
+	})
 }

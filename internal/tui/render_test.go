@@ -90,17 +90,17 @@ func TestTunnelRouteTextExplainsEndpointDirection(t *testing.T) {
 	}{
 		{
 			name: "local forward",
-			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Local, LocalPort: "9090", RemotePort: "22"},
+			tun:  &tunnel.Tunnel{SSHConfig: cfg, Forward: platform.ForwardSpec{Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "9090", RemoteAddr: "22"}},
 			want: "127.0.0.1:9090 -> REMOTE 127.0.0.1:22",
 		},
 		{
 			name: "remote forward",
-			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Remote, LocalPort: "127.0.0.1:22", RemotePort: "0.0.0.0:9090"},
+			tun:  &tunnel.Tunnel{SSHConfig: cfg, Forward: platform.ForwardSpec{Type: tunnel.Remote, Protocol: tunnel.TCP, LocalAddr: "127.0.0.1:22", RemoteAddr: "0.0.0.0:9090"}},
 			want: "0.0.0.0:9090 -> LOCAL 127.0.0.1:22",
 		},
 		{
 			name: "dynamic forward",
-			tun:  &tunnel.Tunnel{SSHConfig: cfg, Type: tunnel.Dynamic, LocalPort: "1080"},
+			tun:  &tunnel.Tunnel{SSHConfig: cfg, Forward: platform.ForwardSpec{Type: tunnel.Dynamic, Protocol: tunnel.TCP, LocalAddr: "1080"}},
 			want: "127.0.0.1:1080 -> SOCKS5",
 		},
 	}
@@ -127,8 +127,8 @@ func TestRenderTunnelRouteTextHighlightsEndpointLabels(t *testing.T) {
 func TestViewDoesNotPrefixHostPortAddressWithExtraColon(t *testing.T) {
 	m := newTestModelWithTunnel()
 	tun := m.manager.List()[0]
-	tun.LocalPort = "127.0.0.1:5555"
-	tun.RemotePort = "10.0.0.15:5551"
+	tun.Forward.LocalAddr = "127.0.0.1:5555"
+	tun.Forward.RemoteAddr = "192.0.2.15:5551"
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -136,13 +136,13 @@ func TestViewDoesNotPrefixHostPortAddressWithExtraColon(t *testing.T) {
 	if strings.Contains(clean, ":127.0.0.1:5555") {
 		t.Error("local address should not get an extra leading colon")
 	}
-	if strings.Contains(clean, ":10.0.0.15:5551") {
+	if strings.Contains(clean, ":192.0.2.15:5551") {
 		t.Error("remote address should not get an extra leading colon")
 	}
 	if !strings.Contains(clean, "127.0.0.1:5555") {
 		t.Error("local host:port address should remain visible")
 	}
-	if !strings.Contains(clean, "10.0.0.15:5551") {
+	if !strings.Contains(clean, "192.0.2.15:5551") {
 		t.Error("remote host:port address should remain visible")
 	}
 }
@@ -153,8 +153,8 @@ func TestViewTableFitsMinimumWidth(t *testing.T) {
 	m.height = 20
 	tun := m.manager.List()[0]
 	tun.Name = "very-long-production-tunnel-name-that-needs-truncation"
-	tun.LocalPort = "127.0.0.1:555555555555"
-	tun.RemotePort = "10.0.0.15:555155555555"
+	tun.Forward.LocalAddr = "127.0.0.1:555555555555"
+	tun.Forward.RemoteAddr = "192.0.2.15:555155555555"
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -335,6 +335,76 @@ func TestViewTypeSelectScreen(t *testing.T) {
 	}
 	if !strings.Contains(clean, "Dynamic") {
 		t.Error("Type select screen should show Dynamic option")
+	}
+	if !strings.Contains(clean, "Local UDP") {
+		t.Error("Type select screen should show Local UDP option")
+	}
+	if !strings.Contains(clean, "Remote UDP") {
+		t.Error("Type select screen should show Remote UDP option")
+	}
+}
+
+func TestUDPTypeLabelIncludesProtocol(t *testing.T) {
+	if got := tunnelTypeLabel(tunnel.Local, tunnel.UDP); got != "UDP LOCAL" {
+		t.Fatalf("UDP type label = %q, want UDP LOCAL", got)
+	}
+	if got := tunnelTypeLabel(tunnel.Local, tunnel.TCP); got != "LOCAL" {
+		t.Fatalf("TCP type label = %q, want LOCAL", got)
+	}
+	if got := tunnelTypeLabel(tunnel.Remote, tunnel.UDP); got != "UDP REMOTE" {
+		t.Fatalf("remote UDP type label = %q, want UDP REMOTE", got)
+	}
+}
+
+func TestViewRendersLocalUDPRouteAndRelayHint(t *testing.T) {
+	m := newTestModelWithTunnel()
+	tun := m.manager.List()[0]
+	tun.Forward = platform.ForwardSpec{
+		Type:       tunnel.Local,
+		Protocol:   tunnel.UDP,
+		LocalAddr:  "127.0.0.1:5353",
+		RemoteAddr: "127.0.0.1:53",
+	}
+	tun.Status = tunnel.StatusError
+	tun.Error = "UDP_RELAY_FAILED: executable file not found"
+	m.width = 160
+	m.height = 24
+
+	clean := stripANSI(m.View().Content)
+	if !strings.Contains(clean, "UDP LOCAL") || !strings.Contains(clean, "127.0.0.1:5353 -> REMOTE 127.0.0.1:53") {
+		t.Fatalf("UDP route is not clear in view:\n%s", clean)
+	}
+	if !strings.Contains(clean, "compatible intun binary") {
+		t.Fatalf("missing remote relay installation hint:\n%s", clean)
+	}
+	for _, line := range strings.Split(clean, "\n") {
+		if width := lipgloss.Width(line); width > 160 {
+			t.Fatalf("UDP error view line width = %d, want <= 160: %q", width, line)
+		}
+	}
+	m.width = 80
+	for _, line := range strings.Split(stripANSI(m.View().Content), "\n") {
+		if width := lipgloss.Width(line); width > 80 {
+			t.Fatalf("compact UDP view line width = %d, want <= 80: %q", width, line)
+		}
+	}
+}
+
+func TestViewRendersRemoteUDPDirection(t *testing.T) {
+	m := newTestModelWithTunnel()
+	tun := m.manager.List()[0]
+	tun.Forward = platform.ForwardSpec{
+		Type:       tunnel.Remote,
+		Protocol:   tunnel.UDP,
+		LocalAddr:  "127.0.0.1:53",
+		RemoteAddr: "0.0.0.0:5353",
+	}
+	m.width = 160
+	m.height = 20
+
+	clean := stripANSI(m.View().Content)
+	if !strings.Contains(clean, "UDP REMOTE") || !strings.Contains(clean, "0.0.0.0:5353 -> LOCAL 127.0.0.1:53") {
+		t.Fatalf("Remote UDP direction is not clear in view:\n%s", clean)
 	}
 }
 

@@ -106,7 +106,7 @@ func TestManagerCreateKeepsAsyncConnectionConnectingUntilReady(t *testing.T) {
 	conn := platform.NewMockConnection()
 	conn.SetRunning(false)
 	mockExec := platform.NewMockExecutor()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return conn, nil
 	}
 	m := newTestManager(mockExec)
@@ -127,11 +127,28 @@ func TestManagerCreateKeepsAsyncConnectionConnectingUntilReady(t *testing.T) {
 	}
 }
 
+func TestManagerCreateWithProtocolPassesForwardSpec(t *testing.T) {
+	mockExec := platform.NewMockExecutor()
+	var captured platform.ForwardSpec
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+		captured = spec
+		return platform.NewMockConnection(), nil
+	}
+	m := newTestManager(mockExec)
+	tun, err := m.CreateWithProtocol("udp", &platform.SSHConfig{Host: "example.com"}, Local, UDP, "127.0.0.1:5353", "127.0.0.1:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tun.Forward.Protocol != UDP || captured.Type != platform.Local || captured.Protocol != platform.UDP || captured.LocalAddr != "127.0.0.1:5353" || captured.RemoteAddr != "127.0.0.1:53" {
+		t.Fatalf("captured forward = %#v, tunnel protocol = %s", captured, tun.Forward.Protocol)
+	}
+}
+
 func TestManagerCreateAsyncConnectionFailureBecomesError(t *testing.T) {
 	conn := platform.NewMockConnection()
 	conn.SetRunning(false)
 	mockExec := platform.NewMockExecutor()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return conn, nil
 	}
 	m := newTestManager(mockExec)

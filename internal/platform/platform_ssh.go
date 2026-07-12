@@ -32,17 +32,19 @@ type SSHConnection struct {
 func (c *SSHConnection) Stop() error {
 	var err error
 	c.stopOnce.Do(func() {
-		if c.keepaliveStop != nil {
-			close(c.keepaliveStop)
-		}
 		c.mu.Lock()
-		forwards := c.forwards
+		keepaliveStop := c.keepaliveStop
+		forwards := append([]io.Closer(nil), c.forwards...)
 		client := c.client
 		c.exited = true
+		c.ready = false
 		c.mu.Unlock()
 
+		if keepaliveStop != nil {
+			close(keepaliveStop)
+		}
 		for _, f := range forwards {
-			f.Close()
+			_ = f.Close()
 		}
 		if client != nil {
 			err = client.Close()
@@ -104,7 +106,7 @@ func (c *SSHConnection) sendKeepalive() {
 			_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
 			if err != nil {
 				sshLog.Warn("keepalive failed", slog.Any("error", err))
-				c.setError("SSH_KEEPALIVE_FAILED: " + err.Error())
+				c.failConnection("SSH_KEEPALIVE_FAILED: " + err.Error())
 				return
 			}
 		}
@@ -133,22 +135,48 @@ func (c *SSHConnection) setError(msg string) {
 	c.mu.Unlock()
 }
 
-func (c *SSHConnection) setConnectionLost(msg string) {
+func (c *SSHConnection) setConnectionLost(msg string) bool {
 	c.mu.Lock()
 	if c.exited || c.lastError != "" {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	c.exited = true
 	c.ready = false
 	c.lastError = msg
 	c.mu.Unlock()
+	c.closeForwardResources()
+	return true
 }
 
-func (c *SSHConnection) addForward(f io.Closer) {
+func (c *SSHConnection) failConnection(msg string) {
+	c.setError(msg)
+	c.closeForwardResources()
+}
+
+func (c *SSHConnection) closeForwardResources() {
+	c.mu.RLock()
+	forwards := append([]io.Closer(nil), c.forwards...)
+	client := c.client
+	c.mu.RUnlock()
+	for _, forward := range forwards {
+		_ = forward.Close()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+}
+
+func (c *SSHConnection) addForward(f io.Closer) bool {
 	c.mu.Lock()
+	if c.exited {
+		c.mu.Unlock()
+		_ = f.Close()
+		return false
+	}
 	c.forwards = append(c.forwards, f)
 	c.mu.Unlock()
+	return true
 }
 
 func (c *SSHConnection) NewSFTPClient() (interface{}, error) {
@@ -170,17 +198,17 @@ func newPlatformExecutor() Executor {
 	return &SSHExecutor{}
 }
 
-func (e *SSHExecutor) Connect(authCtx *AuthContext, cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) (Connection, error) {
+func (e *SSHExecutor) Connect(authCtx *AuthContext, cfg *SSHConfig, spec ForwardSpec) (Connection, error) {
 	conn := &SSHConnection{
 		authCtx: authCtx,
 	}
 
-	go e.connect(conn, cfg, tunnelType, localPort, remotePort)
+	go e.connect(conn, cfg, spec)
 
 	return conn, nil
 }
 
-func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) {
+func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, spec ForwardSpec) {
 	if conn.authCtx != nil && conn.authCtx.Cancel != nil {
 		select {
 		case <-conn.authCtx.Cancel.Done():
@@ -188,6 +216,10 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 			return
 		default:
 		}
+	}
+	if err := spec.Validate(); err != nil {
+		conn.setError("INVALID_FORWARD: " + err.Error())
+		return
 	}
 
 	if cfg.Host == "" {
@@ -250,23 +282,20 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, tunnelType Tu
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	conn.mu.Lock()
+	if conn.exited {
+		conn.mu.Unlock()
+		_ = client.Close()
+		return
+	}
 	conn.client = client
 	conn.keepaliveStop = make(chan struct{})
 	conn.mu.Unlock()
 
 	go conn.sendKeepalive()
 
-	switch tunnelType {
-	case Local:
-		e.startLocalForward(conn, localPort, remotePort)
-	case Remote:
-		e.startRemoteForward(conn, localPort, remotePort)
-	case Dynamic:
-		e.startDynamicForward(conn, localPort)
-	default:
-		conn.setError(fmt.Sprintf("UNKNOWN_TUNNEL_TYPE: %s", tunnelType))
-	}
-	if conn.Error() != "" {
+	if err := e.startForward(conn, spec); err != nil {
+		conn.setError(err.Error())
+		_ = client.Close()
 		return
 	}
 	conn.setReady()

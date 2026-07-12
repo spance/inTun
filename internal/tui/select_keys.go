@@ -60,6 +60,7 @@ func (m Model) handleTypeSelectKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.typeCursor >= 0 && m.typeCursor < len(items) {
 			item := items[m.typeCursor]
 			m.selectedType = item.t
+			m.selectedProtocol = item.p
 			m.screen = ScreenInputPort
 			m.portInput = ""
 			m.inputMode = 0
@@ -110,8 +111,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.err = nil
 			m.localPort = m.portInput
-			m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, "")
-			m.screen = ScreenMain
+			m.completeSelectedTunnel(m.localPort, "")
 			return m, nil
 		}
 		if m.selectedType == tunnel.Remote {
@@ -140,8 +140,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.remotePort = "127.0.0.1:" + m.portInput
 			}
-			m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, m.remotePort)
-			m.screen = ScreenMain
+			m.completeSelectedTunnel(m.localPort, m.remotePort)
 			return m, nil
 		}
 		if m.inputMode == 0 {
@@ -169,8 +168,7 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.remotePort = "127.0.0.1:" + m.portInput
 		}
-		m.manager.Create(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.localPort, m.remotePort)
-		m.screen = ScreenMain
+		m.completeSelectedTunnel(m.localPort, m.remotePort)
 		return m, nil
 	case "esc", "q":
 		m.screen = ScreenSelectType
@@ -190,4 +188,8 @@ func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) createSelectedTunnel(localAddr, remoteAddr string) {
+	m.manager.CreateWithProtocol(m.selectedHost.Name, m.buildSSHConfig(), m.selectedType, m.selectedProtocol, localAddr, remoteAddr)
 }

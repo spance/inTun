@@ -141,6 +141,40 @@ func TestSSHConnectionStateHelpers(t *testing.T) {
 	}
 }
 
+func TestSSHConnectionRejectsForwardAfterStop(t *testing.T) {
+	conn := &SSHConnection{keepaliveStop: make(chan struct{})}
+	if err := conn.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conn.keepaliveStop:
+	default:
+		t.Fatal("Stop should close keepalive channel")
+	}
+	closer := &countingCloser{}
+	if conn.addForward(closer) {
+		t.Fatal("stopped connection should reject a new forward")
+	}
+	if closer.closed != 1 {
+		t.Fatalf("rejected forward close count = %d, want 1", closer.closed)
+	}
+}
+
+func TestFailConnectionClosesForwardResources(t *testing.T) {
+	conn := &SSHConnection{}
+	closer := &countingCloser{}
+	if !conn.addForward(closer) {
+		t.Fatal("active connection should accept forward")
+	}
+	conn.failConnection("UDP_RELAY_FAILED: EOF")
+	if closer.closed != 1 {
+		t.Fatalf("failed connection forward close count = %d, want 1", closer.closed)
+	}
+	if conn.IsRunning() || conn.Error() != "UDP_RELAY_FAILED: EOF" {
+		t.Fatalf("failed connection state = running:%v error:%q", conn.IsRunning(), conn.Error())
+	}
+}
+
 func TestSSHConnectionStatsAndSFTPUnavailable(t *testing.T) {
 	conn := &SSHConnection{}
 	conn.totalUpload.Store(10)
@@ -363,10 +397,10 @@ func TestStartLocalForwardReportsListenFailure(t *testing.T) {
 	defer listener.Close()
 
 	conn := &SSHConnection{}
-	(&SSHExecutor{}).startLocalForward(conn, listener.Addr().String(), "80")
+	err = (&SSHExecutor{}).startLocalForward(conn, listener.Addr().String(), "80")
 
-	if got := conn.Error(); !strings.Contains(got, "LISTEN_FAILED") {
-		t.Fatalf("local forward error = %q, want LISTEN_FAILED", got)
+	if err == nil || !strings.Contains(err.Error(), "LISTEN_FAILED") {
+		t.Fatalf("local forward error = %v, want LISTEN_FAILED", err)
 	}
 }
 
@@ -375,13 +409,13 @@ func TestSSHExecutorConnectEarlyFailures(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	conn, err := exec.Connect(&AuthContext{Cancel: ctx}, &SSHConfig{Host: "example.com"}, Local, "1", "2")
+	conn, err := exec.Connect(&AuthContext{Cancel: ctx}, &SSHConfig{Host: "example.com"}, ForwardSpec{Type: Local, Protocol: TCP, LocalAddr: "1", RemoteAddr: "2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitForConnectionError(t, conn, "cancelled")
 
-	conn, err = exec.Connect(nil, &SSHConfig{}, Local, "1", "2")
+	conn, err = exec.Connect(nil, &SSHConfig{}, ForwardSpec{Type: Local, Protocol: TCP, LocalAddr: "1", RemoteAddr: "2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +464,7 @@ func TestMockConnectionAndExecutor(t *testing.T) {
 
 	exec := NewMockExecutor()
 	cfg := &SSHConfig{Host: "example.com"}
-	gotConn, err := exec.Connect(nil, cfg, Local, "1", "2")
+	gotConn, err := exec.Connect(nil, cfg, ForwardSpec{Type: Local, Protocol: TCP, LocalAddr: "1", RemoteAddr: "2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,18 +472,18 @@ func TestMockConnectionAndExecutor(t *testing.T) {
 		t.Fatalf("mock executor did not record connection")
 	}
 
-	exec.ConnectFn = func(cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*MockConnection, error) {
-		if cfg.Host != "example.com" || tunnelType != Remote || localPort != "3" || remotePort != "4" {
+	exec.ConnectFn = func(cfg *SSHConfig, spec ForwardSpec) (*MockConnection, error) {
+		if cfg.Host != "example.com" || spec.Type != Remote || spec.LocalAddr != "3" || spec.RemoteAddr != "4" {
 			return nil, errors.New("unexpected args")
 		}
 		return NewMockConnection(), nil
 	}
-	if _, err := exec.Connect(nil, cfg, Remote, "3", "4"); err != nil {
+	if _, err := exec.Connect(nil, cfg, ForwardSpec{Type: Remote, Protocol: TCP, LocalAddr: "3", RemoteAddr: "4"}); err != nil {
 		t.Fatal(err)
 	}
 
 	exec.ConnectErr = ErrAuthFailed
-	if _, err := exec.Connect(nil, cfg, Local, "", ""); !errors.Is(err, ErrAuthFailed) {
+	if _, err := exec.Connect(nil, cfg, ForwardSpec{Type: Local, Protocol: TCP}); !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("Connect error = %v, want ErrAuthFailed", err)
 	}
 }

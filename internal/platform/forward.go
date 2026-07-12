@@ -6,18 +6,16 @@ import (
 	"net"
 )
 
-func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePort string) {
+func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePort string) error {
 	listenAddr := tcpForwardAddr(localPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		sshLog.Warn("local listen failed", "addr", listenAddr, slog.Any("error", err))
-		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
-		if conn.client != nil {
-			conn.client.Close()
-		}
-		return
+		return fmt.Errorf("LISTEN_FAILED: %w", err)
 	}
-	conn.addForward(listener)
+	if !conn.addForward(listener) {
+		return fmt.Errorf("SSH_CONNECTION_LOST: connection stopped before local forward started")
+	}
 	sshLog.Info("local forward listening", "listen", listenAddr, "target", tcpForwardAddr(remotePort))
 
 	go func() {
@@ -29,20 +27,19 @@ func (e *SSHExecutor) startLocalForward(conn *SSHConnection, localPort, remotePo
 			go conn.handleLocalForward(localConn, remotePort)
 		}
 	}()
+	return nil
 }
 
-func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteAddr string) {
+func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteAddr string) error {
 	listenAddr := tcpForwardAddr(remoteAddr)
 	listener, err := conn.client.Listen("tcp", listenAddr)
 	if err != nil {
 		sshLog.Warn("remote listen failed", "addr", listenAddr, slog.Any("error", err))
-		conn.setError(fmt.Sprintf("REMOTE_LISTEN_FAILED: %v", err))
-		if conn.client != nil {
-			conn.client.Close()
-		}
-		return
+		return fmt.Errorf("REMOTE_LISTEN_FAILED: %w", err)
 	}
-	conn.addForward(listener)
+	if !conn.addForward(listener) {
+		return fmt.Errorf("SSH_CONNECTION_LOST: connection stopped before remote forward started")
+	}
 	sshLog.Info("remote forward listening", "listen", listenAddr, "target", tcpForwardAddr(localAddr))
 
 	go func() {
@@ -54,20 +51,19 @@ func (e *SSHExecutor) startRemoteForward(conn *SSHConnection, localAddr, remoteA
 			go conn.handleRemoteForward(remoteConn, localAddr)
 		}
 	}()
+	return nil
 }
 
-func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string) {
+func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string) error {
 	listenAddr := tcpForwardAddr(localPort)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		sshLog.Warn("dynamic listen failed", "addr", listenAddr, slog.Any("error", err))
-		conn.setError(fmt.Sprintf("LISTEN_FAILED: %v", err))
-		if conn.client != nil {
-			conn.client.Close()
-		}
-		return
+		return fmt.Errorf("LISTEN_FAILED: %w", err)
 	}
-	conn.addForward(listener)
+	if !conn.addForward(listener) {
+		return fmt.Errorf("SSH_CONNECTION_LOST: connection stopped before dynamic forward started")
+	}
 	sshLog.Info("dynamic forward listening", "listen", listenAddr)
 
 	go func() {
@@ -79,6 +75,7 @@ func (e *SSHExecutor) startDynamicForward(conn *SSHConnection, localPort string)
 			go conn.handleDynamicForward(localConn)
 		}
 	}()
+	return nil
 }
 
 func (c *SSHConnection) handleLocalForward(localConn net.Conn, remotePort string) {

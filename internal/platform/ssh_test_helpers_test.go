@@ -94,6 +94,29 @@ func waitForForwardListener(t *testing.T, conn *SSHConnection) net.Listener {
 	return listener
 }
 
+func waitForUDPForwardRuntime(t *testing.T, conn *SSHConnection) *udpForwardRuntime {
+	t.Helper()
+
+	var forward *udpForwardRuntime
+	waitForCondition(t, func() bool {
+		conn.mu.RLock()
+		defer conn.mu.RUnlock()
+		if conn.lastError != "" {
+			t.Fatalf("connection failed before UDP forward became ready: %s", conn.lastError)
+		}
+		if len(conn.forwards) == 0 {
+			return false
+		}
+		var ok bool
+		forward, ok = conn.forwards[0].(*udpForwardRuntime)
+		if !ok {
+			t.Fatalf("forward %T is not a local UDP forward", conn.forwards[0])
+		}
+		return conn.ready
+	})
+	return forward
+}
+
 func waitForCondition(t *testing.T, ready func() bool) {
 	t.Helper()
 
@@ -142,6 +165,36 @@ func startEchoServer(t *testing.T) string {
 		}
 	})
 	return listener.Addr().String()
+}
+
+func startUDPEchoServer(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buffer := make([]byte, 65507)
+		for {
+			n, peer, err := listener.ReadFromUDP(buffer)
+			if err != nil {
+				return
+			}
+			_, _ = listener.WriteToUDP(buffer[:n], peer)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("UDP echo server did not stop")
+		}
+	})
+	return listener.LocalAddr().String()
 }
 
 func roundTripTCP(t *testing.T, addr string, message string) {

@@ -39,35 +39,37 @@ const (
 )
 
 type Model struct {
-	screen        Screen
-	manager       *tunnel.Manager
-	hosts         []config.Host
-	hostCursor    int
-	hostScroll    int
-	typeCursor    int
-	typeScroll    int
-	selectedHost  config.Host
-	selectedType  tunnel.TunnelType
-	localPort     string
-	remotePort    string
-	portInput     string
-	inputMode     int
-	selectedIndex int
-	width         int
-	height        int
-	version       string
-	err           error
-	statusMsg     string
-	statusTicks   int
-	statusConfirm bool
-	trafficHist   map[int][]int64
-	authQueue     *AuthPromptQueue
-	promptMode    bool
-	promptInput   string
-	confirmQuit   bool
-	authCtx       *platform.AuthContext
-	cancelCtx     context.Context
-	cancelFunc    context.CancelFunc
+	screen              Screen
+	manager             *tunnel.Manager
+	hosts               []config.Host
+	hostCursor          int
+	hostScroll          int
+	typeCursor          int
+	typeScroll          int
+	selectedHost        config.Host
+	selectedType        tunnel.TunnelType
+	selectedProtocol    tunnel.NetworkProtocol
+	localPort           string
+	remotePort          string
+	portInput           string
+	inputMode           int
+	selectedIndex       int
+	width               int
+	height              int
+	version             string
+	err                 error
+	statusMsg           string
+	statusTicks         int
+	statusConfirm       bool
+	trafficHist         map[int][]int64
+	authQueue           *AuthPromptQueue
+	promptMode          bool
+	promptInput         string
+	confirmQuit         bool
+	pendingTunnelCreate *pendingTunnelCreate
+	authCtx             *platform.AuthContext
+	cancelCtx           context.Context
+	cancelFunc          context.CancelFunc
 
 	sftpClient              *sftp.Client
 	sftpLocalDir            string
@@ -104,6 +106,11 @@ type sftpTransferResult struct {
 	target    string
 	direction string
 	report    sftp.TransferReport
+}
+
+type pendingTunnelCreate struct {
+	localAddr  string
+	remoteAddr string
 }
 
 type sftpPendingSync struct {
@@ -187,6 +194,7 @@ type typeItem struct {
 	name string
 	desc string
 	t    tunnel.TunnelType
+	p    tunnel.NetworkProtocol
 }
 
 func (m Model) Init() tea.Cmd {

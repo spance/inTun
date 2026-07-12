@@ -44,7 +44,7 @@ func TestMonitorStartStop(t *testing.T) {
 func TestMonitorUpdatesStats(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tt platform.TunnelType, local, remote string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -74,7 +74,7 @@ func TestMonitorUpdatesStats(t *testing.T) {
 func TestMonitorDetectsConnectionFailure(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tt platform.TunnelType, local, remote string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -107,7 +107,7 @@ func TestMonitorDetectsConnectionFailure(t *testing.T) {
 func TestMonitorSuccessfulPing(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tt platform.TunnelType, local, remote string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -158,7 +158,7 @@ func TestMonitorSkipsStoppedTunnels(t *testing.T) {
 func TestMonitorHandlesConnectionFailure(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tt platform.TunnelType, local, remote string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -243,7 +243,7 @@ func TestMonitorContextCancellation(t *testing.T) {
 func TestMonitorCalculatesSpeed(t *testing.T) {
 	mockExec := platform.NewMockExecutor()
 	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, tt platform.TunnelType, local, remote string) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
 		return mockConn, nil
 	}
 

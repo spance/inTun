@@ -117,7 +117,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 		leftWidth = 12
 	}
 	route := tunnelRouteText(t)
-	typeLabel := tunnelTypeLabel(t.Type)
+	typeLabel := tunnelTypeLabel(t.Forward.Type, t.Forward.Protocol)
 	routeWidth := leftWidth - lipgloss.Width(typeLabel) - 2
 	if routeWidth < 1 {
 		routeWidth = 1
@@ -144,9 +144,9 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 }
 
 func tunnelRouteText(t *tunnel.Tunnel) string {
-	local := formatTunnelAddr(t.LocalPort)
-	remote := formatTunnelAddr(t.RemotePort)
-	switch t.Type {
+	local := formatTunnelAddr(t.Forward.LocalAddr)
+	remote := formatTunnelAddr(t.Forward.RemoteAddr)
+	switch t.Forward.Type {
 	case tunnel.Local:
 		return fmt.Sprintf("%s -> REMOTE %s", local, remote)
 	case tunnel.Remote:
@@ -259,7 +259,10 @@ func tunnelStatusLabel(t *tunnel.Tunnel) string {
 	}
 }
 
-func tunnelTypeLabel(t tunnel.TunnelType) string {
+func tunnelTypeLabel(t tunnel.TunnelType, protocol tunnel.NetworkProtocol) string {
+	if protocol == tunnel.UDP {
+		return "UDP " + strings.ToUpper(t.String())
+	}
 	return strings.ToUpper(t.String())
 }
 
@@ -301,6 +304,12 @@ func renderTunnelErrorHint(t *tunnel.Tunnel, width int) []string {
 		return []string{
 			dangerStyle.Render("SSH connection lost - press 'r' to reconnect"),
 			mutedStyle.Render(truncate(detail, width)),
+		}
+	case strings.Contains(errMsg, "UDP_RELAY_FAILED"):
+		return []string{
+			dangerStyle.Render("Remote UDP relay unavailable:"),
+			mutedStyle.Render(truncate(errMsg, width)),
+			mutedStyle.Render(truncate("Install a compatible intun binary on the remote host and ensure it is in PATH.", width)),
 		}
 	default:
 		return []string{dangerStyle.Render("Error: " + truncate(errMsg, width))}

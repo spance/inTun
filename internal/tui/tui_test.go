@@ -242,7 +242,7 @@ func TestModelDynamicPortInputPasteFiltersAddress(t *testing.T) {
 	m = updateModel(m, keyMsg("c"))
 	m = updateModel(m, keyEnter())
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 4; i++ {
 		m = updateModel(m, keyDown())
 	}
 	m = updateModel(m, keyEnter())
@@ -308,7 +308,7 @@ func TestModelDynamicTunnelPortInput(t *testing.T) {
 	m = updateModel(m, keyMsg("c"))
 	m = updateModel(m, keyEnter())
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 4; i++ {
 		m = updateModel(m, keyDown())
 	}
 
@@ -324,6 +324,109 @@ func TestModelDynamicTunnelPortInput(t *testing.T) {
 
 	if m.portInput != "1080" {
 		t.Errorf("portInput = %q, want %q", m.portInput, "1080")
+	}
+}
+
+func TestModelCreatesLocalUDPTunnel(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	m = updateModel(m, keyMsg("c"))
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyDown())
+	m = updateModel(m, keyEnter())
+	if m.selectedType != tunnel.Local || m.selectedProtocol != tunnel.UDP {
+		t.Fatalf("selection = %s/%s, want Local/UDP", m.selectedType, m.selectedProtocol)
+	}
+	m = updateModel(m, keyMsg("5353"))
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyMsg("53"))
+	m = updateModel(m, keyEnter())
+
+	tunnels := m.manager.List()
+	if len(tunnels) != 1 {
+		t.Fatalf("tunnel count = %d, want 1", len(tunnels))
+	}
+	if tunnels[0].Forward.Protocol != tunnel.UDP || tunnels[0].Forward.LocalAddr != "127.0.0.1:5353" || tunnels[0].Forward.RemoteAddr != "127.0.0.1:53" {
+		t.Fatalf("UDP tunnel = %#v", tunnels[0])
+	}
+}
+
+func TestModelCreatesRemoteUDPTunnel(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	m = updateModel(m, keyMsg("c"))
+	m = updateModel(m, keyEnter())
+	for i := 0; i < 3; i++ {
+		m = updateModel(m, keyDown())
+	}
+	m = updateModel(m, keyEnter())
+	if m.selectedType != tunnel.Remote || m.selectedProtocol != tunnel.UDP {
+		t.Fatalf("selection = %s/%s, want Remote/UDP", m.selectedType, m.selectedProtocol)
+	}
+	m = updateModel(m, keyMsg("53"))
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyMsg("5353"))
+	m = updateModel(m, keyEnter())
+
+	tunnels := m.manager.List()
+	if len(tunnels) != 1 {
+		t.Fatalf("tunnel count = %d, want 1", len(tunnels))
+	}
+	forward := tunnels[0].Forward
+	if forward.Type != tunnel.Remote || forward.Protocol != tunnel.UDP || forward.LocalAddr != "127.0.0.1:53" || forward.RemoteAddr != "127.0.0.1:5353" {
+		t.Fatalf("Remote UDP forward = %#v", forward)
+	}
+}
+
+func TestModelConfirmsNonLoopbackRemoteUDPBind(t *testing.T) {
+	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
+	m := newTestModel(hosts)
+	m.width = 100
+	m.height = 30
+
+	m = updateModel(m, keyMsg("c"))
+	m = updateModel(m, keyEnter())
+	for i := 0; i < 3; i++ {
+		m = updateModel(m, keyDown())
+	}
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyMsg("53"))
+	m = updateModel(m, keyEnter())
+	m = updateModel(m, keyMsg("0.0.0.0:5353"))
+	m = updateModel(m, keyEnter())
+
+	if m.pendingTunnelCreate == nil {
+		t.Fatal("non-loopback Remote UDP bind should require confirmation")
+	}
+	if len(m.manager.List()) != 0 {
+		t.Fatal("Remote UDP tunnel should not be created before confirmation")
+	}
+	clean := stripANSI(m.View().Content)
+	if !strings.Contains(clean, "Expose Remote UDP Port?") || !strings.Contains(clean, "0.0.0.0:5353") || !strings.Contains(clean, "127.0.0.1:53") {
+		t.Fatalf("confirmation modal does not show operation direction and endpoints:\n%s", clean)
+	}
+	m = updateModel(m, keyMsg("y"))
+	if m.pendingTunnelCreate != nil || m.screen != ScreenMain || len(m.manager.List()) != 1 {
+		t.Fatalf("confirmed Remote UDP creation state = pending:%v screen:%v tunnels:%d", m.pendingTunnelCreate != nil, m.screen, len(m.manager.List()))
+	}
+}
+
+func TestRemoteUDPBindConfirmationPolicy(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:5353", "[::1]:5353"} {
+		if remoteUDPBindRequiresConfirmation(addr) {
+			t.Fatalf("loopback bind %q should not require exposure confirmation", addr)
+		}
+	}
+	for _, addr := range []string{"0.0.0.0:5353", "192.0.2.10:5353", "bad-address"} {
+		if !remoteUDPBindRequiresConfirmation(addr) {
+			t.Fatalf("non-loopback bind %q should require exposure confirmation", addr)
+		}
 	}
 }
 

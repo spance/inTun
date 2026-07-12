@@ -9,11 +9,14 @@ import (
 )
 
 type TunnelType = platform.TunnelType
+type NetworkProtocol = platform.NetworkProtocol
 
 const (
-	Local   TunnelType = platform.Local
-	Remote  TunnelType = platform.Remote
-	Dynamic TunnelType = platform.Dynamic
+	Local   TunnelType      = platform.Local
+	Remote  TunnelType      = platform.Remote
+	Dynamic TunnelType      = platform.Dynamic
+	TCP     NetworkProtocol = platform.TCP
+	UDP     NetworkProtocol = platform.UDP
 )
 
 type Status int
@@ -44,9 +47,7 @@ type Tunnel struct {
 	ID            int
 	Name          string
 	SSHConfig     *platform.SSHConfig
-	Type          TunnelType
-	LocalPort     string
-	RemotePort    string
+	Forward       platform.ForwardSpec
 	Status        Status
 	Conn          platform.Connection
 	Error         string
@@ -89,17 +90,24 @@ func (m *Manager) SetExecutor(exec platform.Executor) {
 }
 
 func (m *Manager) Create(name string, cfg *platform.SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*Tunnel, error) {
+	return m.CreateWithProtocol(name, cfg, tunnelType, TCP, localPort, remotePort)
+}
+
+func (m *Manager) CreateWithProtocol(name string, cfg *platform.SSHConfig, tunnelType TunnelType, protocol NetworkProtocol, localPort, remotePort string) (*Tunnel, error) {
 	m.mu.Lock()
 
 	t := &Tunnel{
-		ID:         m.nextID,
-		Name:       name,
-		SSHConfig:  cfg,
-		Type:       tunnelType,
-		LocalPort:  localPort,
-		RemotePort: remotePort,
-		Status:     StatusConnecting,
-		CreatedAt:  time.Now(),
+		ID:        m.nextID,
+		Name:      name,
+		SSHConfig: cfg,
+		Forward: platform.ForwardSpec{
+			Type:       tunnelType,
+			Protocol:   protocol,
+			LocalAddr:  localPort,
+			RemoteAddr: remotePort,
+		},
+		Status:    StatusConnecting,
+		CreatedAt: time.Now(),
 	}
 	m.nextID++
 	m.Tunnels = append(m.Tunnels, t)
@@ -115,7 +123,7 @@ func (m *Manager) Create(name string, cfg *platform.SSHConfig, tunnelType Tunnel
 }
 
 func (m *Manager) startTunnel(t *Tunnel) error {
-	conn, err := m.executor.Connect(m.authCtx, t.SSHConfig, t.Type, t.LocalPort, t.RemotePort)
+	conn, err := m.executor.Connect(m.authCtx, t.SSHConfig, t.Forward)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}

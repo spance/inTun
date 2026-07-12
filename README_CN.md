@@ -13,7 +13,7 @@ Interactive SSH Tunnel - 跨平台 SSH 隧道管理器，基于纯 Go 实现，�
 
 ## 功能特性
 
-- **三种隧道模式**：本地端口转发 (-L)、远程端口转发 (-R)、动态 SOCKS 代理 (-D)
+- **TCP 与 UDP 转发**：本地与远程 TCP/UDP 转发，以及动态 SOCKS5 TCP 代理 (-D)
 - **纯 Go SSH 实现**：不依赖系统 ssh/plink，完全跨平台
 - **实时监控**：上下行流量统计 (TX/RX)、传输速率、网络延迟
 - **自动配置**：解析 `~/.ssh/config` 自动发现主机
@@ -61,10 +61,30 @@ make install    # 构建并复制到 /usr/local/bin/
 1. 按 `c` 创建新隧道
 2. 从 `~/.ssh/config` 列表中选择主机
 3. 选择隧道类型：
-   - **本地**：将本地端口转发至远程服务
-   - **远程**：将远程端口转发至本地服务（支持 LAN 目标地址）
-   - **动态**：创建 SOCKS 代理
+   - **本地 TCP**：将本地 TCP 端口转发至远程服务
+   - **本地 UDP**：通过 SSH 将本地 UDP 数据报中继至远程 UDP 服务
+   - **远程 TCP**：将远程 TCP 端口转发至本地服务（支持 LAN 目标地址）
+   - **远程 UDP**：开放远端 UDP 端口，并将数据报中继至本地 UDP 服务
+   - **动态 TCP**：创建 SOCKS5 TCP 代理
 4. 按提示输入端口号
+
+### 协议模型
+
+每条隧道只包含一个方向和一种协议。TCP 与 UDP 隧道彼此独立，可以同时运行；由于操作系统分别维护 TCP 和 UDP 端口空间，两条不同协议的隧道也可以使用相同的数字端口。
+
+| 隧道类型 | 监听端 / 客户端侧 | 目标端 |
+|----------|-------------------|--------|
+| 本地 TCP | 本机 TCP 监听端口 | 远端 TCP 服务 |
+| 本地 UDP | 本机 UDP 客户端 | 远端 UDP 服务 |
+| 远程 TCP | 远端 TCP 监听端口 | 本机 TCP 服务 |
+| 远程 UDP | 远端 UDP 客户端 | 本机 UDP 服务 |
+| 动态 TCP | 本机 SOCKS5 监听端口 | 远端可达的 TCP 目标 |
+
+UDP 转发使用带长度边界的数据报协议封装在 SSH session 中，远端主机的 `PATH` 中必须安装兼容版本的 `intun`。该模式保留 UDP 数据报边界，但 SSH 底层仍为 TCP，会受到队头阻塞影响；适合 DNS、监控和控制流量，不适合对延迟敏感的音视频、游戏或 QUIC。
+
+远程 UDP 仅输入端口时默认绑定 `127.0.0.1`。显式填写 `0.0.0.0:5353` 等非回环地址会按照远端账户权限和主机防火墙对 LAN 或公网暴露。UDP listener 由远端 `intun` 进程直接创建，因此不受 OpenSSH `GatewayPorts` 和 `AllowTcpForwarding` 控制。
+
+远程 UDP 是有状态中继：每个远端来源使用独立的本地 UDP socket，但本地目标看到的是 inTun 的本地源地址，而不是原始远端客户端地址。当前不支持广播和组播转发。
 
 ### 快捷键
 
@@ -100,6 +120,7 @@ SFTP 界面：
 - SSH 私钥：`~/.ssh/id_rsa`、`id_ed25519` 或 `id_ecdsa`，或使用密码认证
 - SSH 配置文件：`~/.ssh/config`（可选，用于主机发现）
 - 远端 SSH 服务启用 SFTP 子系统（仅使用 SFTP 管理器时需要）
+- 远端 `PATH` 中存在兼容版本的 `intun`（使用 UDP 转发时需要）
 
 ## 配置
 
@@ -128,6 +149,9 @@ Host myserver
 - **SSH 库**: [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh)
 - **SFTP 库**: [github.com/pkg/sftp](https://github.com/pkg/sftp)
 - **样式渲染**: [lipgloss](https://github.com/charmbracelet/lipgloss)
+- **转发模型**: 每条隧道持有一个方向/协议规格，再分派给相互独立的 TCP 或 UDP 实现
+- **UDP 中继**: 通过 SSH session 传输带版本和长度边界的 UDP 帧，支持客户端 association 映射与空闲回收
+- **UDP 角色**: `PeerRelay` 负责监听端口和客户端 association，`TargetRelay` 为每个 association 管理独立的目标 socket；本地与远程模式会交换两种角色所在的位置
 - **统计监控**: 1秒间隔采样，5秒间隔 SSH 探测，TX/RX 总量 + ↑↓ 速率指示
 - **TUI 安全性**: 共享 modal 弹窗、SFTP 传输结果确认、可取消的 SFTP 操作、串行化 SFTP 客户端访问
 
@@ -172,6 +196,7 @@ internal/
   ├── tunnel/              # 隧道生命周期管理（线程安全）
   ├── monitor/             # 统计监控（同步更新）
   ├── sftp/                # SFTP 读写、同步、预览、重命名
+  ├── udprelay/            # UDP 帧协议、角色中继、association 生命周期
   └── tui/                 # TUI 模型、共享 modal、SFTP 动作与渲染
 ```
 

@@ -1,15 +1,18 @@
 package platform
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	pkgsftp "github.com/pkg/sftp"
+	"github.com/spance/intun/internal/udprelay"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -227,26 +230,51 @@ func (s *testSSHServer) handleSession(newChan ssh.NewChannel) {
 		return
 	}
 	for req := range requests {
-		if req.Type != "subsystem" {
-			_ = req.Reply(false, nil)
-			continue
-		}
-		var payload struct {
-			Name string
-		}
-		if err := ssh.Unmarshal(req.Payload, &payload); err != nil || payload.Name != "sftp" {
-			_ = req.Reply(false, nil)
-			continue
-		}
-		_ = req.Reply(true, nil)
-		server, err := pkgsftp.NewServer(channel, pkgsftp.WithServerWorkingDirectory(s.root))
-		if err != nil {
+		switch req.Type {
+		case "subsystem":
+			var payload struct {
+				Name string
+			}
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil || payload.Name != "sftp" {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			_ = req.Reply(true, nil)
+			server, err := pkgsftp.NewServer(channel, pkgsftp.WithServerWorkingDirectory(s.root))
+			if err != nil {
+				_ = channel.Close()
+				return
+			}
+			_ = server.Serve()
 			_ = channel.Close()
 			return
+		case "exec":
+			var payload struct {
+				Command string
+			}
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			fields := strings.Fields(payload.Command)
+			if len(fields) < 3 || fields[0] != "intun" || fields[1] != "relay" {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			_ = req.Reply(true, nil)
+			err := udprelay.RunCommand(context.Background(), fields[2:], channel, channel, channel.Stderr())
+			status := uint32(0)
+			if err != nil {
+				status = 1
+				_, _ = fmt.Fprintln(channel.Stderr(), err)
+			}
+			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: status}))
+			_ = channel.Close()
+			return
+		default:
+			_ = req.Reply(false, nil)
+			continue
 		}
-		_ = server.Serve()
-		_ = channel.Close()
-		return
 	}
 	_ = channel.Close()
 }

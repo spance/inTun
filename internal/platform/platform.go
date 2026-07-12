@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -24,6 +25,50 @@ func (t TunnelType) String() string {
 	default:
 		return "Unknown"
 	}
+}
+
+type NetworkProtocol int
+
+const (
+	TCP NetworkProtocol = iota
+	UDP
+)
+
+func (p NetworkProtocol) String() string {
+	switch p {
+	case TCP:
+		return "TCP"
+	case UDP:
+		return "UDP"
+	default:
+		return "Unknown"
+	}
+}
+
+type ForwardSpec struct {
+	Type       TunnelType
+	Protocol   NetworkProtocol
+	LocalAddr  string
+	RemoteAddr string
+}
+
+func (s ForwardSpec) Validate() error {
+	if s.Type < Local || s.Type > Dynamic {
+		return fmt.Errorf("unknown tunnel type: %d", s.Type)
+	}
+	if s.Protocol < TCP || s.Protocol > UDP {
+		return fmt.Errorf("unknown network protocol: %d", s.Protocol)
+	}
+	if s.LocalAddr == "" {
+		return fmt.Errorf("local address is required")
+	}
+	if s.Type != Dynamic && s.RemoteAddr == "" {
+		return fmt.Errorf("remote address is required")
+	}
+	if s.Protocol == UDP && s.Type == Dynamic {
+		return fmt.Errorf("%s UDP forwarding is not supported", s.Type)
+	}
+	return nil
 }
 
 type AuthRequestType int
@@ -73,7 +118,7 @@ type SFTPCapable interface {
 }
 
 type Executor interface {
-	Connect(ctx *AuthContext, cfg *SSHConfig, tunnelType TunnelType, localPort, remotePort string) (Connection, error)
+	Connect(ctx *AuthContext, cfg *SSHConfig, spec ForwardSpec) (Connection, error)
 }
 
 func NewExecutor() Executor {

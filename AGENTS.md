@@ -16,8 +16,14 @@ internal/
   ├── config/
   │   └── config.go            # ~/.ssh/config parser, returns []Host; supports #!! GroupLabels
   ├── platform/
-  │   ├── platform.go          # Core interfaces: Connection, SFTPCapable, Executor, AuthContext
+  │   ├── platform.go          # Core interfaces and ForwardSpec direction/protocol model
   │   ├── platform_ssh.go      # SSHExecutor.connect() - SSH handshake, tunnel creation, keepalive, NewSFTPClient
+  │   ├── forward_dispatch.go  # Forwarder selection for TCP and UDP implementations
+  │   ├── forward.go           # Local/Remote/Dynamic TCP forwarding
+  │   ├── udp_forward.go       # Local/Remote UDP composition and remote relay startup handshake
+  │   ├── udp_forward_runtime.go # Shared UDP relay process lifecycle and failure propagation
+  │   ├── udp_frame_transport.go # UDP payload accounting over the framed transport
+  │   ├── bounded_buffer.go    # Bounded relay diagnostics captured from remote sessions
   │   ├── mock.go              # MockConnection + MockExecutor for testing
   │   ├── known_hosts.go       # Host key verification, VerifyHostKey() with host:port format
   │   └── counted_conn.go      # Traffic counting wrapper for net.Conn
@@ -27,17 +33,32 @@ internal/
   │   └── monitor.go           # Stats polling, ping every 5 ticks (1s interval), synchronous updates
   ├── sftp/
   │   └── client.go            # Context-aware SFTP wrapper: read, sync, preview, rename, remote path helpers
+  ├── udprelay/
+  │   ├── protocol.go          # Versioned, length-delimited UDP frame codec
+  │   ├── transport.go         # Concurrent-safe framed stream transport abstraction
+  │   ├── registry.go          # Bounded local peer/association mapping
+  │   ├── peer.go              # UDP listener role and peer/association routing
+  │   ├── target.go            # Fixed-target role, per-association sockets, limits, idle cleanup
+  │   ├── server.go            # Relay options and stream-oriented target entry point
+  │   └── command.go           # Hidden intun relay command used over SSH
   └── tui/
       ├── tui.go               # Bubbletea model, auth prompt queue, main screens, shared styles
       ├── modal.go             # Reusable full-screen modal overlay
+      ├── tunnel_create_confirm.go # Remote UDP exposure confirmation
       ├── sftp_actions.go      # SFTP key handling, context/cancel, transfer orchestration
       └── sftp_render.go       # SFTP dual-panel rendering, progress, preview
 ```
 
 ## Key Implementation Details
 
+### Forward Model
+- Each Tunnel owns exactly one ForwardSpec with one direction and one protocol: TCP or UDP, never both
+- TCP and UDP tunnels are independent and can run concurrently, including on the same numeric port because their socket namespaces are separate
+- Local/Remote describe where the listener is created; the opposite side is the target
+- A future combined TCP+UDP UX should group two child ForwardSpecs rather than add a `ProtocolBoth` branch throughout the forwarding stack
+
 ### SSH Connection Flow
-1. Manager.Create() -> executor.Connect()
+1. Manager.Create()/CreateWithProtocol() builds a ForwardSpec -> executor.Connect()
 2. SSHExecutor.connect() parses SSH config, loads identity files
 3. HostKeyCallback wraps VerifyHostKey() with original host:port
 4. VerifyHostKey() uses knownhosts callback with "host:port" format (required!)
@@ -52,7 +73,7 @@ internal/
 - No ping-fail-count based detection (removed due to false positives)
 
 ### Thread Safety
-- **SSHConnection**: mu protects client, forwards, exited, lastError; addForward() helper for safe append
+- **SSHConnection**: mu protects client, forwards, exited, lastError; addForward() rejects and closes late forwards after Stop
 - **Tunnel**: mu protects Status, Error, stats; use setStatus() setter (never write directly); GetSnapshot() for atomic reads
 - **Manager**: mu protects Tunnels list; Restart() releases mu during sleep to avoid blocking
 - **Monitor**: synchronous updateTunnelStats() (no goroutine per tunnel)
@@ -87,6 +108,19 @@ internal/
 - Supports no-auth only (method 0x00)
 - Address types: IPv4 (0x01) and domain (0x03)
 - Proper SOCKS5 error replies for unsupported commands/address types
+
+### UDP over SSH
+- Local and Remote UDP preserve datagram boundaries with a versioned frame protocol over an SSH session/TCP transport
+- PeerRelay owns a UDP listener and peer/association map; TargetRelay owns one connected target socket per association
+- Local UDP composes local PeerRelay + remote TargetRelay; Remote UDP composes remote PeerRelay + local TargetRelay
+- Remote commands use `intun relay udp <target|listen> --address-token ...`; a compatible `intun` must be available in the remote `PATH`
+- Both sides cap associations at 1024
+- Associations expire after 60 seconds; stale remote close frames cannot remove recently active local mappings
+- Relay readiness is part of tunnel startup, so status remains Connecting until the remote relay acknowledges Ready
+- UDP payload bytes feed the existing TX/RX counters; protocol framing bytes are excluded
+- Remote UDP listeners are sockets owned by the remote `intun` process; OpenSSH `GatewayPorts` and `AllowTcpForwarding` do not govern them
+- Remote UDP targets see inTun's relay source address rather than the original remote peer; broadcast and multicast are not supported
+- UDP-over-TCP is not suitable for latency-sensitive media, gaming, or QUIC because of TCP head-of-line blocking
 
 ### SFTP File Manager
 - Entry: press `f` on Running tunnel, reuses SSH connection via SFTPCapable interface
@@ -123,6 +157,9 @@ internal/
 - [ ] Connection lost shows SSH_CONNECTION_LOST message
 - [ ] Reconnect (r) works after connection failure
 - [ ] Remote tunnel accepts ip:port format for both local target and remote listen
+- [ ] Local UDP stays Connecting until remote relay Ready, then relays multiple local clients without mixing replies
+- [ ] Remote UDP returns its bound address in Ready, isolates remote peers, and releases the remote socket on Stop
+- [ ] Missing or incompatible remote `intun` produces a clear UDP_RELAY_FAILED hint
 - [ ] SFTP long file lists scroll with arrows and PgUp/PgDn
 - [ ] SFTP sync, recursive sync, rename, and preview work from both panels
 - [ ] SFTP rename rejects path separators and parent/current directory names
@@ -134,7 +171,8 @@ internal/
 - SOCKS5 dynamic proxy: no-auth only, no IPv6 address type
 - Single auth request at a time (queue-based)
 - Host key format in known_hosts must be "host:port" for proper matching
-- Remote tunnel listen requires GatewayPorts yes on server for non-localhost
+- Remote TCP listen requires `GatewayPorts yes` on the server for non-loopback addresses; Remote UDP has separate process-owned listener semantics described above
+- One tunnel owns one protocol; offering TCP and UDP on the same numeric port requires two tunnels
 - SFTP preview is intentionally capped at the first 4KB
 - SFTP exit may block briefly while cancel/close completes
 
