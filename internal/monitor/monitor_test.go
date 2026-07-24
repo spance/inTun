@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spance/intun/internal/platform"
+	"github.com/spance/intun/internal/testutil"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -24,8 +25,19 @@ func TestNewMonitor(t *testing.T) {
 	}
 }
 
+func TestMonitorDefaultsInvalidIntervalAndStartsOnce(t *testing.T) {
+	mon := NewMonitor(tunnel.NewManager(nil), 0)
+	if mon.interval != defaultMonitorInterval {
+		t.Fatalf("interval = %v, want %v", mon.interval, defaultMonitorInterval)
+	}
+	mon.Start()
+	mon.Start()
+	mon.Stop()
+	mon.Stop()
+}
+
 func TestMonitorStartStop(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := tunnel.NewManager(nil)
 	m.SetExecutor(mockExec)
 
@@ -42,9 +54,9 @@ func TestMonitorStartStop(t *testing.T) {
 }
 
 func TestMonitorUpdatesStats(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
-	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockConn := testutil.NewMockConnection()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -63,18 +75,19 @@ func TestMonitorUpdatesStats(t *testing.T) {
 
 	mon.Stop()
 
-	if tun.UploadBytes != 1024 {
-		t.Errorf("UploadBytes = %d, want 1024", tun.UploadBytes)
+	snapshot := tun.Snapshot()
+	if snapshot.UploadBytes != 1024 {
+		t.Errorf("UploadBytes = %d, want 1024", snapshot.UploadBytes)
 	}
-	if tun.DownloadBytes != 2048 {
-		t.Errorf("DownloadBytes = %d, want 2048", tun.DownloadBytes)
+	if snapshot.DownloadBytes != 2048 {
+		t.Errorf("DownloadBytes = %d, want 2048", snapshot.DownloadBytes)
 	}
 }
 
 func TestMonitorDetectsConnectionFailure(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
-	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockConn := testutil.NewMockConnection()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -105,9 +118,9 @@ func TestMonitorDetectsConnectionFailure(t *testing.T) {
 }
 
 func TestMonitorSuccessfulPing(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
-	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockConn := testutil.NewMockConnection()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -129,19 +142,21 @@ func TestMonitorSuccessfulPing(t *testing.T) {
 	if tun.GetStatus() != tunnel.StatusRunning {
 		t.Errorf("Status = %v, want Running", tun.GetStatus())
 	}
-	if tun.Latency == 0 {
+	if tun.Snapshot().Latency == 0 {
 		t.Error("Latency should be updated from ping")
 	}
 }
 
 func TestMonitorSkipsStoppedTunnels(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := tunnel.NewManager(nil)
 	m.SetExecutor(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	tun, _ := m.Create("test", cfg, tunnel.Local, "8080", "80")
-	tun.Status = tunnel.StatusStopped
+	if err := m.Stop(tun.ID()); err != nil {
+		t.Fatal(err)
+	}
 
 	mon := NewMonitor(m, 50*time.Millisecond)
 	mon.Start()
@@ -150,15 +165,15 @@ func TestMonitorSkipsStoppedTunnels(t *testing.T) {
 
 	mon.Stop()
 
-	if tun.UploadBytes != 0 {
+	if tun.Snapshot().UploadBytes != 0 {
 		t.Error("Stopped tunnel should not update stats")
 	}
 }
 
 func TestMonitorHandlesConnectionFailure(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
-	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockConn := testutil.NewMockConnection()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -189,21 +204,26 @@ func TestPingIntervalMultiplier(t *testing.T) {
 }
 
 func TestMonitorMultipleTunnels(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := tunnel.NewManager(nil)
 	m.SetExecutor(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
-	tun1, _ := m.Create("t1", cfg, tunnel.Local, "8080", "80")
-	tun2, _ := m.Create("t2", cfg, tunnel.Local, "9090", "90")
-
-	conn1 := platform.NewMockConnection()
-	conn2 := platform.NewMockConnection()
+	conn1 := testutil.NewMockConnection()
+	conn2 := testutil.NewMockConnection()
 	conn1.SetStats(100, 200)
 	conn2.SetStats(300, 400)
+	call := 0
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
+		call++
+		if call == 1 {
+			return conn1, nil
+		}
+		return conn2, nil
+	}
 
-	tun1.Conn = conn1
-	tun2.Conn = conn2
+	tun1, _ := m.Create("t1", cfg, tunnel.Local, "8080", "80")
+	tun2, _ := m.Create("t2", cfg, tunnel.Local, "9090", "90")
 
 	mon := NewMonitor(m, 50*time.Millisecond)
 	mon.Start()
@@ -212,11 +232,11 @@ func TestMonitorMultipleTunnels(t *testing.T) {
 
 	mon.Stop()
 
-	if tun1.UploadBytes != 100 {
-		t.Errorf("tun1.UploadBytes = %d, want 100", tun1.UploadBytes)
+	if got := tun1.Snapshot().UploadBytes; got != 100 {
+		t.Errorf("tun1.UploadBytes = %d, want 100", got)
 	}
-	if tun2.UploadBytes != 300 {
-		t.Errorf("tun2.UploadBytes = %d, want 300", tun2.UploadBytes)
+	if got := tun2.Snapshot().UploadBytes; got != 300 {
+		t.Errorf("tun2.UploadBytes = %d, want 300", got)
 	}
 }
 
@@ -241,9 +261,9 @@ func TestMonitorContextCancellation(t *testing.T) {
 }
 
 func TestMonitorCalculatesSpeed(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
-	mockConn := platform.NewMockConnection()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockConn := testutil.NewMockConnection()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return mockConn, nil
 	}
 
@@ -252,8 +272,6 @@ func TestMonitorCalculatesSpeed(t *testing.T) {
 
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	tun, _ := m.Create("test", cfg, tunnel.Local, "8080", "80")
-	tun.Conn = mockConn
-
 	mockConn.SetStats(0, 0)
 
 	mon := NewMonitor(m, 100*time.Millisecond)
@@ -267,17 +285,18 @@ func TestMonitorCalculatesSpeed(t *testing.T) {
 
 	mon.Stop()
 
-	if tun.UploadBytes != 5000 {
-		t.Errorf("UploadBytes = %d, want 5000", tun.UploadBytes)
+	snapshot := tun.Snapshot()
+	if snapshot.UploadBytes != 5000 {
+		t.Errorf("UploadBytes = %d, want 5000", snapshot.UploadBytes)
 	}
-	if tun.DownloadBytes != 10000 {
-		t.Errorf("DownloadBytes = %d, want 10000", tun.DownloadBytes)
+	if snapshot.DownloadBytes != 10000 {
+		t.Errorf("DownloadBytes = %d, want 10000", snapshot.DownloadBytes)
 	}
 
-	if tun.UploadSpeed <= 0 && tun.UploadBytes > 0 {
-		t.Errorf("UploadSpeed should be positive when traffic increased, got %d", tun.UploadSpeed)
+	if snapshot.UploadSpeed <= 0 && snapshot.UploadBytes > 0 {
+		t.Errorf("UploadSpeed should be positive when traffic increased, got %d", snapshot.UploadSpeed)
 	}
-	if tun.DownloadSpeed <= 0 && tun.DownloadBytes > 0 {
-		t.Errorf("DownloadSpeed should be positive when traffic increased, got %d", tun.DownloadSpeed)
+	if snapshot.DownloadSpeed <= 0 && snapshot.DownloadBytes > 0 {
+		t.Errorf("DownloadSpeed should be positive when traffic increased, got %d", snapshot.DownloadSpeed)
 	}
 }

@@ -27,7 +27,7 @@ func sftpEntryViewAt(files []sftp.FileEntry, index int) (sftpEntryView, bool) {
 		return sftpEntryView{}, false
 	}
 	entry := files[idx]
-	name := entry.Name
+	name := safeInline(entry.Name)
 	if entry.IsDir {
 		name += "/"
 	}
@@ -220,6 +220,7 @@ func formatSFTPBreadcrumb(path string, width int) string {
 	if width <= 0 {
 		return ""
 	}
+	path = safeInline(path)
 	if path == "" {
 		return "-"
 	}

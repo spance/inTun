@@ -3,6 +3,13 @@ package tui
 import tea "charm.land/bubbletea/v2"
 
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" && !m.confirmQuit {
+		if m.hasLiveTunnels() {
+			m.confirmQuit = true
+			return m, nil
+		}
+		return m, tea.Quit
+	}
 	if m.promptMode {
 		return m.handlePromptKeys(msg)
 	}
@@ -21,6 +28,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMainKeys(msg)
 	case ScreenSelectHost:
 		return m.handleHostSelectKeys(msg)
+	case ScreenInputHost:
+		return m.handleManualHostKeys(msg)
 	case ScreenSelectType:
 		return m.handleTypeSelectKeys(msg)
 	case ScreenInputPort:

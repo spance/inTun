@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spance/intun/internal/config"
+	"github.com/spance/intun/internal/logging"
 	"github.com/spance/intun/internal/monitor"
 	"github.com/spance/intun/internal/tui"
 	"github.com/spance/intun/internal/tunnel"
@@ -16,12 +19,18 @@ import (
 var Version = "dev"
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "relay" {
 		if err := udprelay.RunCommand(context.Background(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "UDP relay failed: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("UDP relay failed: %w", err)
 		}
-		return
+		return nil
 	}
 
 	hosts, err := config.ParseSSHConfig()
@@ -31,15 +40,20 @@ func main() {
 	}
 
 	manager := tunnel.NewManager(nil)
-	mon := monitor.NewMonitor(manager, 1000000000)
+	defer logging.Close()
+	defer manager.StopAll()
+
+	mon := monitor.NewMonitor(manager, time.Second)
 	mon.Start()
 	defer mon.Stop()
 
 	model := tui.NewModel(hosts, manager, Version)
 	p := tea.NewProgram(model)
 
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	finalModel, runErr := p.Run()
+	var closeErr error
+	if closer, ok := finalModel.(interface{ Close() error }); ok {
+		closeErr = closer.Close()
 	}
+	return errors.Join(runErr, closeErr)
 }

@@ -7,7 +7,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
-	"github.com/spance/intun/internal/sftp"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -15,13 +14,7 @@ type AuthRequest = platform.AuthRequest
 type AuthResponse = platform.AuthResponse
 
 const (
-	minTermWidth   = 80
-	colIDW         = 4
-	colStatusW     = 13
-	colTypeW       = 10
-	colAddrW       = 21
-	colLatencyW    = 8
-	colFixedWidth  = 2 + colIDW + 1 + 3 + colStatusW + 1 + colTypeW + 1 + colAddrW + 1 + colAddrW + 1 + colLatencyW
+	minTermWidth   = 32
 	defaultWidth   = 120
 	defaultHeight  = 30
 	hostListHeight = 30
@@ -33,92 +26,23 @@ type Screen int
 const (
 	ScreenMain Screen = iota
 	ScreenSelectHost
+	ScreenInputHost
 	ScreenSelectType
 	ScreenInputPort
 	ScreenSFTP
 )
 
 type Model struct {
-	screen              Screen
-	manager             *tunnel.Manager
-	hosts               []config.Host
-	hostCursor          int
-	hostScroll          int
-	typeCursor          int
-	typeScroll          int
-	selectedHost        config.Host
-	selectedType        tunnel.TunnelType
-	selectedProtocol    tunnel.NetworkProtocol
-	localPort           string
-	remotePort          string
-	portInput           string
-	inputMode           int
-	selectedIndex       int
-	width               int
-	height              int
-	version             string
-	err                 error
-	statusMsg           string
-	statusTicks         int
-	statusConfirm       bool
-	trafficHist         map[int][]int64
-	authQueue           *AuthPromptQueue
-	promptMode          bool
-	promptInput         string
-	confirmQuit         bool
-	pendingTunnelCreate *pendingTunnelCreate
-	authCtx             *platform.AuthContext
-	cancelCtx           context.Context
-	cancelFunc          context.CancelFunc
-
-	sftpClient              *sftp.Client
-	sftpLocalDir            string
-	sftpRemoteDir           string
-	sftpLocalFiles          []sftp.FileEntry
-	sftpRemoteFiles         []sftp.FileEntry
-	sftpFocus               int
-	sftpCursor              [2]int
-	sftpScroll              [2]int
-	sftpTransferring        bool
-	sftpProgress            *sftp.ProgressInfo
-	sftpPreview             string
-	sftpPreviewing          bool
-	sftpCancel              context.CancelFunc
-	sftpTransferID          int
-	sftpTunnelID            int
-	sftpHostLabel           string
-	sftpDone                chan sftpTransferResult
-	sftpDirection           string
-	sftpPrevDone            int64
-	sftpRenaming            bool
-	sftpRenameInput         string
-	sftpSyncConfirm         bool
-	sftpSyncConfirmMsg      string
-	sftpOverwriteConfirm    bool
-	sftpOverwriteConfirmMsg string
-	sftpPendingSync         sftpPendingSync
-}
-
-type sftpTransferResult struct {
-	id        int
-	err       error
-	source    string
-	target    string
-	direction string
-	report    sftp.TransferReport
-}
-
-type pendingTunnelCreate struct {
-	localAddr  string
-	remoteAddr string
-}
-
-type sftpPendingSync struct {
-	focus  int
-	source string
-	target string
-	name   string
-	size   int64
+	manager *tunnel.Manager
+	appState
+	hostSelectionState
+	tunnelCreationState
+	tunnelListState
+	noticeState
+	authState
+	sftpState
+	runtimeState
+	componentState
 }
 
 func (m *Model) setStatusMsg(msg string) {
@@ -169,24 +93,37 @@ func NewModel(hosts []config.Host, manager *tunnel.Manager, version string) Mode
 	authQueue := NewAuthPromptQueue()
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	authCtx := &platform.AuthContext{
-		RequestChan: authQueue.RequestChan(),
-		Cancel:      cancelCtx,
-		Timeout:     30 * time.Second,
+		RequestChan:    authQueue.RequestChan(),
+		Cancel:         cancelCtx,
+		CancelRequests: authQueue.CancelAll,
+		Timeout:        30 * time.Second,
 	}
 	manager.SetAuthContext(authCtx)
 
 	return Model{
-		screen:        ScreenMain,
-		manager:       manager,
-		hosts:         hosts,
-		authQueue:     authQueue,
-		authCtx:       authCtx,
-		cancelCtx:     cancelCtx,
-		cancelFunc:    cancelFunc,
-		selectedIndex: 0,
-		width:         defaultWidth,
-		version:       version,
-		trafficHist:   make(map[int][]int64),
+		manager: manager,
+		appState: appState{
+			screen:  ScreenMain,
+			width:   defaultWidth,
+			version: version,
+		},
+		hostSelectionState: hostSelectionState{
+			hosts:      hosts,
+			hostFilter: newTextInput("alias, host, user or label"),
+		},
+		tunnelCreationState: tunnelCreationState{
+			manualHostInput: newTextInput("user@host:port"),
+		},
+		tunnelListState: tunnelListState{
+			trafficHist: make(map[int][]int64),
+		},
+		authState: authState{authQueue: authQueue},
+		runtimeState: runtimeState{
+			authCtx:    authCtx,
+			cancelCtx:  cancelCtx,
+			cancelFunc: cancelFunc,
+		},
+		componentState: newComponentState(),
 	}
 }
 
@@ -203,7 +140,24 @@ func (m Model) Init() tea.Cmd {
 			return tickMsg{}
 		}),
 		m.pollAuthRequests(),
+		m.spinner.Tick,
 	)
+}
+
+func (m Model) Close() error {
+	if m.sftpOperationCancel != nil {
+		m.sftpOperationCancel()
+	}
+	if m.sftpCancel != nil {
+		m.sftpCancel()
+	}
+	if m.cancelFunc != nil {
+		m.cancelFunc()
+	}
+	if m.sftpClient != nil {
+		return m.sftpClient.Close()
+	}
+	return nil
 }
 
 func (m Model) pollAuthRequests() tea.Cmd {

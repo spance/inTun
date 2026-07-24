@@ -1,206 +1,37 @@
 package platform
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"sync"
-	"sync/atomic"
 	"time"
 
-	sftp "github.com/pkg/sftp"
-	"github.com/spance/intun/internal/logging"
 	"golang.org/x/crypto/ssh"
 )
 
-type SSHConnection struct {
-	client        *ssh.Client
-	lastError     string
-	exited        bool
-	ready         bool
-	mu            sync.RWMutex
-	stopOnce      sync.Once
-	forwards      []io.Closer
-	totalUpload   atomic.Int64
-	totalDownload atomic.Int64
-	knownHosts    *KnownHosts
-	authCtx       *AuthContext
-	keepaliveStop chan struct{}
-}
-
-func (c *SSHConnection) Stop() error {
-	var err error
-	c.stopOnce.Do(func() {
-		c.mu.Lock()
-		keepaliveStop := c.keepaliveStop
-		forwards := append([]io.Closer(nil), c.forwards...)
-		client := c.client
-		c.exited = true
-		c.ready = false
-		c.mu.Unlock()
-
-		if keepaliveStop != nil {
-			close(keepaliveStop)
-		}
-		for _, f := range forwards {
-			_ = f.Close()
-		}
-		if client != nil {
-			err = client.Close()
-		}
-	})
-	return err
-}
-
-func (c *SSHConnection) IsRunning() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.ready && !c.exited
-}
-
-func (c *SSHConnection) Error() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.lastError
-}
-
-func (c *SSHConnection) GetStats() (int64, int64) {
-	return c.totalUpload.Load(), c.totalDownload.Load()
-}
-
-func (c *SSHConnection) Ping() time.Duration {
-	c.mu.RLock()
-	if c.exited || c.client == nil {
-		c.mu.RUnlock()
-		return 0
-	}
-	client := c.client
-	c.mu.RUnlock()
-
-	start := time.Now()
-	_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
-	if err != nil {
-		return 0
-	}
-	return time.Since(start)
-}
-
-func (c *SSHConnection) sendKeepalive() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.keepaliveStop:
-			return
-		case <-ticker.C:
-			c.mu.RLock()
-			if c.exited || c.client == nil {
-				c.mu.RUnlock()
-				return
-			}
-			client := c.client
-			c.mu.RUnlock()
-
-			_, _, err := client.SendRequest("keepalive@openssh.org", true, nil)
-			if err != nil {
-				sshLog.Warn("keepalive failed", slog.Any("error", err))
-				c.failConnection("SSH_KEEPALIVE_FAILED: " + err.Error())
-				return
-			}
-		}
-	}
-}
-
-func (c *SSHConnection) setExited() {
-	c.mu.Lock()
-	c.exited = true
-	c.mu.Unlock()
-}
-
-func (c *SSHConnection) setReady() {
-	c.mu.Lock()
-	if !c.exited && c.lastError == "" {
-		c.ready = true
-	}
-	c.mu.Unlock()
-}
-
-func (c *SSHConnection) setError(msg string) {
-	c.mu.Lock()
-	c.exited = true
-	c.ready = false
-	c.lastError = msg
-	c.mu.Unlock()
-}
-
-func (c *SSHConnection) setConnectionLost(msg string) bool {
-	c.mu.Lock()
-	if c.exited || c.lastError != "" {
-		c.mu.Unlock()
-		return false
-	}
-	c.exited = true
-	c.ready = false
-	c.lastError = msg
-	c.mu.Unlock()
-	c.closeForwardResources()
-	return true
-}
-
-func (c *SSHConnection) failConnection(msg string) {
-	c.setError(msg)
-	c.closeForwardResources()
-}
-
-func (c *SSHConnection) closeForwardResources() {
-	c.mu.RLock()
-	forwards := append([]io.Closer(nil), c.forwards...)
-	client := c.client
-	c.mu.RUnlock()
-	for _, forward := range forwards {
-		_ = forward.Close()
-	}
-	if client != nil {
-		_ = client.Close()
-	}
-}
-
-func (c *SSHConnection) addForward(f io.Closer) bool {
-	c.mu.Lock()
-	if c.exited {
-		c.mu.Unlock()
-		_ = f.Close()
-		return false
-	}
-	c.forwards = append(c.forwards, f)
-	c.mu.Unlock()
-	return true
-}
-
-func (c *SSHConnection) NewSFTPClient() (interface{}, error) {
-	c.mu.RLock()
-	client := c.client
-	exited := c.exited
-	c.mu.RUnlock()
-	if exited || client == nil {
-		return nil, fmt.Errorf("SSH_CONNECTION_LOST: connection not available")
-	}
-	return sftp.NewClient(client)
-}
-
 type SSHExecutor struct{}
-
-var sshLog = logging.Default().With("component", "ssh")
 
 func newPlatformExecutor() Executor {
 	return &SSHExecutor{}
 }
 
 func (e *SSHExecutor) Connect(authCtx *AuthContext, cfg *SSHConfig, spec ForwardSpec) (Connection, error) {
+	baseCtx := context.Background()
+	authCopy := AuthContext{}
+	if authCtx != nil {
+		authCopy = *authCtx
+		if authCtx.Cancel != nil {
+			baseCtx = authCtx.Cancel
+		}
+	}
+	runCtx, cancel := context.WithCancel(baseCtx)
+	authCopy.Cancel = runCtx
 	conn := &SSHConnection{
-		authCtx: authCtx,
+		authCtx: &authCopy,
+		cancel:  cancel,
 	}
 
 	go e.connect(conn, cfg, spec)
@@ -222,6 +53,10 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, spec ForwardS
 		return
 	}
 
+	if cfg == nil {
+		conn.setError("SSH_CONNECTION_FAILED: no SSH configuration provided")
+		return
+	}
 	if cfg.Host == "" {
 		conn.setError("SSH_CONNECTION_FAILED: no host specified")
 		return
@@ -234,68 +69,46 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, spec ForwardS
 	}
 	conn.knownHosts = knownHosts
 
-	originalHost := cfg.Host
-	originalPort := cfg.Port
-	if originalPort == "" {
-		originalPort = "22"
+	var (
+		upstream *ssh.Client
+		jumps    []*ssh.Client
+	)
+	for index := range cfg.ProxyJumps {
+		jumpCfg := cfg.ProxyJumps[index]
+		jump, dialErr := e.dialSSHClient(conn.authCtx.Cancel, conn.authCtx, &jumpCfg, knownHosts, upstream)
+		if dialErr != nil {
+			closeSSHClients(jumps)
+			conn.setError(fmt.Sprintf("SSH_CONNECTION_FAILED: ProxyJump %s: %v", jumpCfg.Host, dialErr))
+			return
+		}
+		jumps = append(jumps, jump)
+		upstream = jump
 	}
 
-	port := cfg.Port
-	if port == "" {
-		port = "22"
-	}
-
-	sshConfig := &ssh.ClientConfig{
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return knownHosts.VerifyHostKey(conn.authCtx, 0, originalHost, originalPort, key)
-		},
-		Timeout: 10 * time.Second,
-	}
-
-	if cfg.User != "" {
-		sshConfig.User = cfg.User
-	}
-
-	authMethods, authErr := e.getAuthMethods(cfg.IdentityFile, conn.authCtx, 0, cfg.User, cfg.Host)
-	if len(authMethods) == 0 {
-		conn.setError(fmt.Sprintf("SSH_AUTH_FAILED: %v", authErr))
-		return
-	}
-	sshConfig.Auth = authMethods
-
-	addr := cfg.Host + ":" + port
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-	netConn, err := dialer.Dial("tcp", addr)
+	client, err := e.dialSSHClient(conn.authCtx.Cancel, conn.authCtx, cfg, knownHosts, upstream)
 	if err != nil {
+		closeSSHClients(jumps)
 		conn.setError(fmt.Sprintf("SSH_CONNECTION_FAILED:%s: %v", cfg.Host, err))
 		return
 	}
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, sshConfig)
-	if err != nil {
-		netConn.Close()
-		conn.setError(fmt.Sprintf("SSH_CONNECTION_FAILED:%s: %v", cfg.Host, err))
-		return
-	}
-	client := ssh.NewClient(sshConn, chans, reqs)
 	conn.mu.Lock()
 	if conn.exited {
 		conn.mu.Unlock()
 		_ = client.Close()
+		closeSSHClients(jumps)
 		return
 	}
 	conn.client = client
 	conn.keepaliveStop = make(chan struct{})
+	for _, jump := range jumps {
+		conn.forwards = append(conn.forwards, jump)
+	}
 	conn.mu.Unlock()
 
 	go conn.sendKeepalive()
 
 	if err := e.startForward(conn, spec); err != nil {
-		conn.setError(err.Error())
-		_ = client.Close()
+		conn.failConnection(err.Error())
 		return
 	}
 	conn.setReady()
@@ -310,7 +123,79 @@ func (e *SSHExecutor) connect(conn *SSHConnection, cfg *SSHConfig, spec ForwardS
 				slog.Any("error", err),
 			)
 			conn.setConnectionLost("SSH_CONNECTION_LOST: " + err.Error())
+			return
 		}
-		conn.setExited()
+		conn.setConnectionLost("SSH_CONNECTION_LOST: connection closed")
 	}()
+}
+
+func (e *SSHExecutor) dialSSHClient(ctx context.Context, authCtx *AuthContext, cfg *SSHConfig, knownHosts *KnownHosts, upstream *ssh.Client) (*ssh.Client, error) {
+	if cfg == nil || cfg.Host == "" {
+		return nil, errors.New("no host specified")
+	}
+	port := cfg.Port
+	if port == "" {
+		port = "22"
+	}
+	authMethods, authClosers, err := e.getAuthMethods(cfg, authCtx, authCtx.TunnelID)
+	defer closeAll(authClosers)
+	if err != nil {
+		return nil, fmt.Errorf("authentication methods: %w", err)
+	}
+	if len(authMethods) == 0 {
+		return nil, errors.New("authentication methods: none available")
+	}
+
+	sshConfig := &ssh.ClientConfig{
+		User: cfg.User,
+		Auth: authMethods,
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			return knownHosts.VerifyHostKey(authCtx, authCtx.TunnelID, cfg.Host, port, key)
+		},
+		Timeout: 10 * time.Second,
+	}
+	addr := net.JoinHostPort(cfg.Host, port)
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var netConn net.Conn
+	if upstream == nil {
+		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		netConn, err = dialer.DialContext(dialCtx, "tcp", addr)
+	} else {
+		netConn, err = upstream.DialContext(dialCtx, "tcp", addr)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	handshakeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-dialCtx.Done():
+			_ = netConn.Close()
+		case <-handshakeDone:
+		}
+	}()
+	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, addr, sshConfig)
+	close(handshakeDone)
+	if err != nil {
+		_ = netConn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
+
+func closeSSHClients(clients []*ssh.Client) {
+	for index := len(clients) - 1; index >= 0; index-- {
+		_ = clients[index].Close()
+	}
+}
+
+func closeAll(closers []io.Closer) {
+	for _, closer := range closers {
+		if closer != nil {
+			_ = closer.Close()
+		}
+	}
 }

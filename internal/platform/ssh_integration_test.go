@@ -68,6 +68,33 @@ func TestSSHExecutorLocalForwardWithInProcessServer(t *testing.T) {
 	waitForNonZeroStats(t, conn)
 }
 
+func TestSSHExecutorConnectsThroughProxyJump(t *testing.T) {
+	jump := startTestSSHServer(t, t.TempDir())
+	target := startTestSSHServer(t, t.TempDir())
+	targetConfig := target.config()
+	targetConfig.ProxyJumps = []SSHConfig{*jump.config()}
+
+	t.Setenv("HOME", t.TempDir())
+	connIface, err := (&SSHExecutor{}).Connect(
+		newIntegrationAuthContext(t),
+		targetConfig,
+		ForwardSpec{Type: Dynamic, Protocol: TCP, LocalAddr: "127.0.0.1:0"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connIface.(*SSHConnection)
+	t.Cleanup(func() { _ = conn.Stop() })
+	waitForSSHClientReady(t, conn)
+
+	conn.mu.RLock()
+	forwardCount := len(conn.forwards)
+	conn.mu.RUnlock()
+	if forwardCount < 2 {
+		t.Fatalf("forward resources = %d, want jump client and dynamic listener", forwardCount)
+	}
+}
+
 func TestSSHExecutorLocalUDPForwardWithInProcessServer(t *testing.T) {
 	echoAddr := startUDPEchoServer(t)
 	server := startTestSSHServer(t, t.TempDir())

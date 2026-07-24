@@ -44,39 +44,11 @@ func NewKnownHosts() (*KnownHosts, error) {
 	return &KnownHosts{path: path, callback: callback}, nil
 }
 
-func (k *KnownHosts) GetHostKeyCallback(ctx *AuthContext, id int) ssh.HostKeyCallback {
-	if k.callback == nil {
-		return k.promptCallback(ctx, id)
-	}
-
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		k.mu.RLock()
-		defer k.mu.RUnlock()
-
-		err := k.callback(hostname, remote, key)
-		if err == nil {
-			return nil
-		}
-
-		var keyErr *knownhosts.KeyError
-		if errors.As(err, &keyErr) {
-			if len(keyErr.Want) == 0 {
-				if ctx == nil || ctx.RequestChan == nil {
-					return errors.New("HOST_KEY_UNKNOWN: no auth context")
-				}
-				return k.handleUnknownHost(ctx, id, hostname, key)
-			}
-		}
-
-		return fmt.Errorf("HOST_KEY_MISMATCH: %s key changed", hostname)
-	}
-}
-
 func (k *KnownHosts) VerifyHostKey(ctx *AuthContext, id int, host string, port string, key ssh.PublicKey) error {
 	if port == "" {
 		port = "22"
 	}
-	hostWithPort := host + ":" + port
+	hostWithPort := net.JoinHostPort(host, port)
 	if k.callback != nil {
 		k.mu.RLock()
 		dummyAddr := &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 22}
@@ -125,10 +97,11 @@ func (k *KnownHosts) handleUnknownHost(ctx *AuthContext, id int, hostname string
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
+	cancelCtx := ctx.cancellationContext()
 
 	select {
 	case ctx.RequestChan <- req:
-	case <-ctx.Cancel.Done():
+	case <-cancelCtx.Done():
 		return errors.New("cancelled")
 	case <-time.After(timeout):
 		return errors.New("auth timeout")
@@ -143,7 +116,7 @@ func (k *KnownHosts) handleUnknownHost(ctx *AuthContext, id int, hostname string
 			return nil
 		}
 		return errors.New("host key rejected")
-	case <-ctx.Cancel.Done():
+	case <-cancelCtx.Done():
 		return errors.New("cancelled")
 	case <-time.After(timeout):
 		return errors.New("auth timeout")
@@ -172,13 +145,4 @@ func (k *KnownHosts) Add(hostname string, key ssh.PublicKey) error {
 
 	k.callback, err = knownhosts.New(k.path)
 	return err
-}
-
-func (k *KnownHosts) promptCallback(ctx *AuthContext, id int) ssh.HostKeyCallback {
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		if ctx == nil || ctx.RequestChan == nil {
-			return errors.New("HOST_KEY_UNKNOWN: no auth context")
-		}
-		return k.handleUnknownHost(ctx, id, hostname, key)
-	}
 }

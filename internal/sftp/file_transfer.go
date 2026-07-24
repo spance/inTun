@@ -5,16 +5,18 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 )
 
 func (s *Client) Download(ctx context.Context, remotePath, localPath string, progress func(int64)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.DownloadWithOptions(ctx, remotePath, localPath, TransferOptions{}, progress)
+}
 
-	if err := checkCanceled(ctx); err != nil {
+func (s *Client) DownloadWithOptions(ctx context.Context, remotePath, localPath string, options TransferOptions, progress func(int64)) error {
+	_, done, err := s.beginOperation(ctx)
+	if err != nil {
 		return err
 	}
+	defer done()
 
 	r, err := s.client.Open(remotePath)
 	if err != nil {
@@ -24,27 +26,31 @@ func (s *Client) Download(ctx context.Context, remotePath, localPath string, pro
 	stopWatchingRemote := closeOnCancel(ctx, r)
 	defer stopWatchingRemote()
 
-	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-		return err
-	}
-	w, err := os.Create(localPath)
+	w, tempPath, err := createLocalTransferFile(localPath, options.AllowOverwrite)
 	if err != nil {
 		return err
 	}
+	defer os.Remove(tempPath)
 	defer w.Close()
 	stopWatchingLocal := closeOnCancel(ctx, w)
 	defer stopWatchingLocal()
 
-	return copyWithContext(ctx, r, w, progress)
+	if err := copyWithContext(ctx, r, w, progress); err != nil {
+		return err
+	}
+	return commitLocalTransfer(w, tempPath, localPath, options.AllowOverwrite)
 }
 
 func (s *Client) Upload(ctx context.Context, localPath, remotePath string, progress func(int64)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.UploadWithOptions(ctx, localPath, remotePath, TransferOptions{}, progress)
+}
 
-	if err := checkCanceled(ctx); err != nil {
+func (s *Client) UploadWithOptions(ctx context.Context, localPath, remotePath string, options TransferOptions, progress func(int64)) error {
+	_, done, err := s.beginOperation(ctx)
+	if err != nil {
 		return err
 	}
+	defer done()
 
 	r, err := os.Open(localPath)
 	if err != nil {
@@ -57,18 +63,25 @@ func (s *Client) Upload(ctx context.Context, localPath, remotePath string, progr
 	if err := s.client.MkdirAll(RemoteDir(remotePath)); err != nil {
 		return err
 	}
-	w, err := s.client.Create(remotePath)
+	w, tempPath, err := createRemoteTransferFile(s.client, remotePath, options.AllowOverwrite)
 	if err != nil {
 		return err
 	}
+	defer s.client.Remove(tempPath)
 	defer w.Close()
 	stopWatchingRemote := closeOnCancel(ctx, w)
 	defer stopWatchingRemote()
 
-	return copyWithContext(ctx, r, w, progress)
+	if err := copyWithContext(ctx, r, w, progress); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return commitRemoteTransfer(s.client, tempPath, remotePath, options.AllowOverwrite)
 }
 
-func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath string) error {
+func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath string, allowOverwrite bool) error {
 	if err := checkCanceled(ctx); err != nil {
 		return err
 	}
@@ -80,13 +93,11 @@ func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath st
 	stopWatchingRemote := closeOnCancel(ctx, r)
 	defer stopWatchingRemote()
 
-	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-		return fmt.Errorf("create local directory: %w", err)
-	}
-	w, err := os.Create(localPath)
+	w, tempPath, err := createLocalTransferFile(localPath, allowOverwrite)
 	if err != nil {
 		return fmt.Errorf("create local file: %w", err)
 	}
+	defer os.Remove(tempPath)
 	defer w.Close()
 	stopWatchingLocal := closeOnCancel(ctx, w)
 	defer stopWatchingLocal()
@@ -94,10 +105,13 @@ func (s *Client) copyRemoteToLocal(ctx context.Context, remotePath, localPath st
 	if err := copyWithContext(ctx, r, w, nil); err != nil {
 		return fmt.Errorf("copy file data: %w", err)
 	}
+	if err := commitLocalTransfer(w, tempPath, localPath, allowOverwrite); err != nil {
+		return fmt.Errorf("commit local file: %w", err)
+	}
 	return nil
 }
 
-func (s *Client) copyLocalToRemote(ctx context.Context, localPath, remotePath string) error {
+func (s *Client) copyLocalToRemote(ctx context.Context, localPath, remotePath string, allowOverwrite bool) error {
 	if err := checkCanceled(ctx); err != nil {
 		return err
 	}
@@ -112,16 +126,23 @@ func (s *Client) copyLocalToRemote(ctx context.Context, localPath, remotePath st
 	if err := s.client.MkdirAll(RemoteDir(remotePath)); err != nil {
 		return fmt.Errorf("create remote directory: %w", err)
 	}
-	w, err := s.client.Create(remotePath)
+	w, tempPath, err := createRemoteTransferFile(s.client, remotePath, allowOverwrite)
 	if err != nil {
 		return fmt.Errorf("create remote file: %w", err)
 	}
+	defer s.client.Remove(tempPath)
 	defer w.Close()
 	stopWatchingRemote := closeOnCancel(ctx, w)
 	defer stopWatchingRemote()
 
 	if err := copyWithContext(ctx, r, w, nil); err != nil {
 		return fmt.Errorf("copy file data: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close remote file: %w", err)
+	}
+	if err := commitRemoteTransfer(s.client, tempPath, remotePath, allowOverwrite); err != nil {
+		return fmt.Errorf("commit remote file: %w", err)
 	}
 	return nil
 }

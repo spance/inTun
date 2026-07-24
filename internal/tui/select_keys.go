@@ -1,23 +1,39 @@
 package tui
 
 import (
-	"fmt"
-	"strings"
-
 	tea "charm.land/bubbletea/v2"
 	"github.com/spance/intun/internal/platform"
 	"github.com/spance/intun/internal/tunnel"
 )
 
 func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if !m.hostFiltering && msg.String() == "/" {
+		return m.beginHostFilter()
+	}
+	if !m.hostFiltering && msg.String() == "m" {
+		return m.beginManualHostInput()
+	}
+	if m.hostFiltering && msg.String() == "esc" {
+		return m.stopHostFilter(true), nil
+	}
+
+	hosts := m.filteredHosts()
 	switch msg.String() {
 	case "enter":
-		if len(m.hosts) > 0 && m.hostCursor < len(m.hosts) {
-			m.selectedHost = m.hosts[m.hostCursor]
+		if len(hosts) > 0 && m.hostCursor < len(hosts) {
+			m.selectedHost = hosts[m.hostCursor]
+			m = m.stopHostFilter(false)
 			m.screen = ScreenSelectType
 			return m, nil
 		}
 	case "esc", "q":
+		if m.hostFiltering {
+			var cmd tea.Cmd
+			m.hostFilter, cmd = m.hostFilter.Update(msg)
+			m.hostCursor = 0
+			m.hostScroll = 0
+			return m, cmd
+		}
 		m.screen = ScreenMain
 		return m, nil
 	case "up", "k":
@@ -25,7 +41,7 @@ func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.hostCursor--
 		}
 	case "down", "j":
-		if m.hostCursor < len(m.hosts)-1 {
+		if m.hostCursor < len(hosts)-1 {
 			m.hostCursor++
 		}
 	case "pgup":
@@ -35,15 +51,29 @@ func (m Model) handleHostSelectKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "pgdown":
 		m.hostCursor += hostSelectVisibleItems(m.height)
-		if m.hostCursor >= len(m.hosts) {
-			m.hostCursor = len(m.hosts) - 1
+		if m.hostCursor >= len(hosts) {
+			m.hostCursor = len(hosts) - 1
 		}
 	case "home":
 		m.hostCursor = 0
 	case "end":
-		if len(m.hosts) > 0 {
-			m.hostCursor = len(m.hosts) - 1
+		if len(hosts) > 0 {
+			m.hostCursor = len(hosts) - 1
 		}
+	default:
+		if m.hostFiltering {
+			before := m.hostFilter.Value()
+			var cmd tea.Cmd
+			m.hostFilter, cmd = m.hostFilter.Update(msg)
+			if m.hostFilter.Value() != before {
+				m.hostCursor = 0
+				m.hostScroll = 0
+			}
+			return m, cmd
+		}
+	}
+	if m.hostCursor < 0 {
+		m.hostCursor = 0
 	}
 	m.hostScroll = clampScroll(m.hostCursor, m.hostScroll, hostSelectVisibleItems(m.height))
 	return m, nil
@@ -93,82 +123,37 @@ func (m Model) handleTypeSelectKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) buildSSHConfig() *platform.SSHConfig {
-	return &platform.SSHConfig{
-		Host:         m.selectedHost.Hostname,
-		Port:         m.selectedHost.Port,
-		User:         m.selectedHost.User,
-		IdentityFile: m.selectedHost.IdentityFile,
+	cfg := &platform.SSHConfig{
+		Host:           m.selectedHost.Hostname,
+		Port:           m.selectedHost.Port,
+		User:           m.selectedHost.User,
+		IdentityFile:   m.selectedHost.IdentityFile,
+		IdentityFiles:  append([]string(nil), m.selectedHost.IdentityFiles...),
+		IdentityAgent:  m.selectedHost.IdentityAgent,
+		IdentitiesOnly: m.selectedHost.IdentitiesOnly,
 	}
+	for _, jump := range m.selectedHost.JumpHosts {
+		cfg.ProxyJumps = append(cfg.ProxyJumps, platform.SSHConfig{
+			Host:           jump.Hostname,
+			Port:           jump.Port,
+			User:           jump.User,
+			IdentityFile:   jump.IdentityFile,
+			IdentityFiles:  append([]string(nil), jump.IdentityFiles...),
+			IdentityAgent:  jump.IdentityAgent,
+			IdentitiesOnly: jump.IdentitiesOnly,
+		})
+	}
+	return cfg
 }
 
 func (m Model) handlePortInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		if m.selectedType == tunnel.Dynamic {
-			if !validPortInput(m.portInput, false) {
-				m.err = fmt.Errorf("invalid SOCKS proxy port: %s", m.portInput)
-				return m, nil
-			}
-			m.err = nil
-			m.localPort = m.portInput
-			m.completeSelectedTunnel(m.localPort, "")
-			return m, nil
-		}
-		if m.selectedType == tunnel.Remote {
-			if m.inputMode == 0 {
-				if !validPortInput(m.portInput, true) {
-					m.err = fmt.Errorf("invalid local target: %s", m.portInput)
-					return m, nil
-				}
-				m.err = nil
-				if strings.Contains(m.portInput, ":") {
-					m.localPort = m.portInput
-				} else {
-					m.localPort = "127.0.0.1:" + m.portInput
-				}
-				m.portInput = ""
-				m.inputMode = 1
-				return m, nil
-			}
-			if !validPortInput(m.portInput, true) {
-				m.err = fmt.Errorf("invalid remote listen: %s", m.portInput)
-				return m, nil
-			}
-			m.err = nil
-			if strings.Contains(m.portInput, ":") {
-				m.remotePort = m.portInput
-			} else {
-				m.remotePort = "127.0.0.1:" + m.portInput
-			}
+		var complete bool
+		m, complete = m.acceptTunnelInput()
+		if complete {
 			m.completeSelectedTunnel(m.localPort, m.remotePort)
-			return m, nil
 		}
-		if m.inputMode == 0 {
-			if !validPortInput(m.portInput, true) {
-				m.err = fmt.Errorf("invalid local listen: %s", m.portInput)
-				return m, nil
-			}
-			m.err = nil
-			if strings.Contains(m.portInput, ":") {
-				m.localPort = m.portInput
-			} else {
-				m.localPort = "127.0.0.1:" + m.portInput
-			}
-			m.portInput = ""
-			m.inputMode = 1
-			return m, nil
-		}
-		if !validPortInput(m.portInput, true) {
-			m.err = fmt.Errorf("invalid remote target: %s", m.portInput)
-			return m, nil
-		}
-		m.err = nil
-		if strings.Contains(m.portInput, ":") {
-			m.remotePort = m.portInput
-		} else {
-			m.remotePort = "127.0.0.1:" + m.portInput
-		}
-		m.completeSelectedTunnel(m.localPort, m.remotePort)
 		return m, nil
 	case "esc", "q":
 		m.screen = ScreenSelectType

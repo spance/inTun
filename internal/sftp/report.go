@@ -24,6 +24,7 @@ const maxExistingDetails = 5
 type OverwriteReport struct {
 	Items []ExistingItem
 	Count int
+	paths map[string]struct{}
 }
 
 func (r *TransferReport) addSkipped(path string, reason interface{}) {
@@ -48,6 +49,10 @@ func (r TransferReport) HasSkipped() bool {
 
 func (r *OverwriteReport) addExisting(path, kind string) {
 	r.Count++
+	if r.paths == nil {
+		r.paths = make(map[string]struct{})
+	}
+	r.paths[path] = struct{}{}
 	if len(r.Items) >= maxExistingDetails {
 		return
 	}
@@ -66,4 +71,15 @@ func (r OverwriteReport) HasOverwrites() bool {
 
 func (r *OverwriteReport) AddExisting(path, kind string) {
 	r.addExisting(path, kind)
+}
+
+func (r OverwriteReport) ApprovedPaths() map[string]struct{} {
+	paths := make(map[string]struct{}, len(r.paths)+len(r.Items))
+	for path := range r.paths {
+		paths[path] = struct{}{}
+	}
+	for _, item := range r.Items {
+		paths[item.Path] = struct{}{}
+	}
+	return paths
 }

@@ -3,6 +3,7 @@ package sftp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -39,6 +40,12 @@ func TestClientRemoteFSReadCloseRename(t *testing.T) {
 	}
 	if _, exists := remote.entries["/remote/c.txt"]; !exists {
 		t.Fatal("new remote path should exist after rename")
+	}
+	if err := client.Rename(context.Background(), "/remote/c.txt", "/remote/b.txt"); !errors.Is(err, ErrOverwriteConfirmationRequired) {
+		t.Fatalf("rename over existing target error = %v", err)
+	}
+	if _, exists := remote.entries["/remote/c.txt"]; !exists {
+		t.Fatal("source should remain after rejected overwrite")
 	}
 
 	if err := client.Close(); err != nil {
@@ -190,8 +197,11 @@ type progressSample struct {
 }
 
 type fakeRemoteFS struct {
-	entries map[string]fakeRemoteEntry
-	closed  int
+	entries      map[string]fakeRemoteEntry
+	closed       int
+	posixRename  bool
+	lstatCalls   int
+	readDirCalls int
 }
 
 type fakeRemoteEntry struct {
@@ -215,7 +225,7 @@ func (i remoteTestInfo) IsDir() bool        { return i.dir }
 func (i remoteTestInfo) Sys() interface{}   { return nil }
 
 func newFakeRemoteFS(entries map[string]fakeRemoteEntry) *fakeRemoteFS {
-	fs := &fakeRemoteFS{entries: make(map[string]fakeRemoteEntry)}
+	fs := &fakeRemoteFS{entries: make(map[string]fakeRemoteEntry), posixRename: true}
 	for remotePath, entry := range entries {
 		clean := cleanFakeRemotePath(remotePath)
 		if entry.info.name == "" {
@@ -259,6 +269,23 @@ func (f *fakeRemoteFS) Rename(oldPath, newPath string) error {
 	return nil
 }
 
+func (f *fakeRemoteFS) PosixRename(oldPath, newPath string) error {
+	return f.Rename(oldPath, newPath)
+}
+
+func (f *fakeRemoteFS) HasExtension(name string) (string, bool) {
+	return "1", f.posixRename && name == "posix-rename@openssh.com"
+}
+
+func (f *fakeRemoteFS) Remove(remotePath string) error {
+	remotePath = cleanFakeRemotePath(remotePath)
+	if _, ok := f.entries[remotePath]; !ok {
+		return fakePathError("remove", remotePath, os.ErrNotExist)
+	}
+	delete(f.entries, remotePath)
+	return nil
+}
+
 func (f *fakeRemoteFS) Open(remotePath string) (io.ReadCloser, error) {
 	remotePath = cleanFakeRemotePath(remotePath)
 	entry, ok := f.entries[remotePath]
@@ -290,6 +317,7 @@ func (f *fakeRemoteFS) MkdirAll(remotePath string) error {
 }
 
 func (f *fakeRemoteFS) Lstat(remotePath string) (os.FileInfo, error) {
+	f.lstatCalls++
 	remotePath = cleanFakeRemotePath(remotePath)
 	entry, ok := f.entries[remotePath]
 	if !ok {
@@ -299,6 +327,7 @@ func (f *fakeRemoteFS) Lstat(remotePath string) (os.FileInfo, error) {
 }
 
 func (f *fakeRemoteFS) ReadDirContext(ctx context.Context, remotePath string) ([]os.FileInfo, error) {
+	f.readDirCalls++
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

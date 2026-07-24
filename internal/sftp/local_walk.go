@@ -34,10 +34,6 @@ func skipLocalDirOnError(info os.FileInfo) error {
 	return nil
 }
 
-func ignoreLocalWalkError(_ string, info os.FileInfo, _ error) error {
-	return skipLocalDirOnError(info)
-}
-
 func transferReportLocalWalkError(report *TransferReport) localWalkErrorFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		report.addSkipped(path, err)

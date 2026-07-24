@@ -1,7 +1,7 @@
 package tunnel
 
 import (
-	"fmt"
+	"context"
 	"sync"
 	"time"
 
@@ -43,230 +43,106 @@ func (s Status) String() string {
 	}
 }
 
-type Tunnel struct {
+type Snapshot struct {
 	ID            int
 	Name          string
-	SSHConfig     *platform.SSHConfig
+	SSHConfig     platform.SSHConfig
+	HasSSHConfig  bool
 	Forward       platform.ForwardSpec
 	Status        Status
-	Conn          platform.Connection
 	Error         string
+	Failure       *platform.Failure
 	CreatedAt     time.Time
 	UploadBytes   int64
 	DownloadBytes int64
 	UploadSpeed   int64
 	DownloadSpeed int64
 	Latency       time.Duration
-	mu            sync.RWMutex
+	LatencyKnown  bool
 }
 
-type Manager struct {
-	Tunnels  []*Tunnel
-	nextID   int
-	mu       sync.RWMutex
-	executor platform.Executor
-	authCtx  *platform.AuthContext
+type Tunnel struct {
+	id            int
+	name          string
+	sshConfig     platform.SSHConfig
+	hasSSHConfig  bool
+	forward       platform.ForwardSpec
+	status        Status
+	conn          platform.Connection
+	failure       *platform.Failure
+	createdAt     time.Time
+	uploadBytes   int64
+	downloadBytes int64
+	uploadSpeed   int64
+	downloadSpeed int64
+	latency       time.Duration
+	latencyKnown  bool
+
+	generation       uint64
+	cancel           context.CancelFunc
+	uploadBase       int64
+	downloadBase     int64
+	lastConnUpload   int64
+	lastConnDownload int64
+	deleted          bool
+	mu               sync.RWMutex
 }
 
-func NewManager(authCtx *platform.AuthContext) *Manager {
-	return &Manager{
-		Tunnels:  make([]*Tunnel, 0),
-		nextID:   1,
-		executor: platform.NewExecutor(),
-		authCtx:  authCtx,
-	}
-}
-
-func (m *Manager) SetAuthContext(ctx *platform.AuthContext) {
-	m.mu.Lock()
-	m.authCtx = ctx
-	m.mu.Unlock()
-}
-
-func (m *Manager) SetExecutor(exec platform.Executor) {
-	m.mu.Lock()
-	m.executor = exec
-	m.mu.Unlock()
-}
-
-func (m *Manager) Create(name string, cfg *platform.SSHConfig, tunnelType TunnelType, localPort, remotePort string) (*Tunnel, error) {
-	return m.CreateWithProtocol(name, cfg, tunnelType, TCP, localPort, remotePort)
-}
-
-func (m *Manager) CreateWithProtocol(name string, cfg *platform.SSHConfig, tunnelType TunnelType, protocol NetworkProtocol, localPort, remotePort string) (*Tunnel, error) {
-	m.mu.Lock()
-
-	t := &Tunnel{
-		ID:        m.nextID,
-		Name:      name,
-		SSHConfig: cfg,
-		Forward: platform.ForwardSpec{
-			Type:       tunnelType,
-			Protocol:   protocol,
-			LocalAddr:  localPort,
-			RemoteAddr: remotePort,
-		},
-		Status:    StatusConnecting,
-		CreatedAt: time.Now(),
-	}
-	m.nextID++
-	m.Tunnels = append(m.Tunnels, t)
-	m.mu.Unlock()
-
-	err := m.startTunnel(t)
-	if err != nil {
-		t.setStatus(StatusError, err.Error())
-		return t, err
-	}
-
-	return t, nil
-}
-
-func (m *Manager) startTunnel(t *Tunnel) error {
-	conn, err := m.executor.Connect(m.authCtx, t.SSHConfig, t.Forward)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	t.setConnection(conn)
-	if conn.IsRunning() {
-		t.setStatus(StatusRunning, "")
-		return nil
-	}
-	if errMsg := conn.Error(); errMsg != "" {
-		t.setStatus(StatusError, errMsg)
-		return fmt.Errorf("connection failed immediately: %s", errMsg)
-	}
-	t.setStatus(StatusConnecting, "")
-	return nil
-}
-
-func (m *Manager) Stop(id int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, t := range m.Tunnels {
-		if t.ID == id {
-			if conn := t.getConnection(); conn != nil {
-				conn.Stop()
-			}
-			t.setStatus(StatusStopped, "")
-			return nil
-		}
-	}
-	return fmt.Errorf("tunnel %d not found", id)
-}
-
-func (m *Manager) Restart(id int) error {
-	m.mu.Lock()
-	for _, t := range m.Tunnels {
-		if t.ID == id {
-			if conn := t.getConnection(); conn != nil {
-				conn.Stop()
-			}
-			m.mu.Unlock()
-
-			time.Sleep(1 * time.Second)
-
-			m.mu.Lock()
-			t.setStatus(StatusConnecting, "")
-			err := m.startTunnel(t)
-			if err != nil {
-				t.setStatus(StatusError, err.Error())
-			}
-			m.mu.Unlock()
-			return err
-		}
-	}
-	m.mu.Unlock()
-	return fmt.Errorf("tunnel %d not found", id)
-}
-
-func (m *Manager) Delete(id int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for i, t := range m.Tunnels {
-		if t.ID == id {
-			if conn := t.getConnection(); conn != nil {
-				conn.Stop()
-			}
-			m.Tunnels = append(m.Tunnels[:i], m.Tunnels[i+1:]...)
-			return nil
-		}
-	}
-	return fmt.Errorf("tunnel %d not found", id)
-}
-
-func (m *Manager) Get(id int) *Tunnel {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, t := range m.Tunnels {
-		if t.ID == id {
-			return t
-		}
-	}
-	return nil
-}
-
-func (m *Manager) List() []*Tunnel {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Tunnels
-}
-
-func (t *Tunnel) UpdateStats(uploadBytes, downloadBytes, uploadSpeed, downloadSpeed int64, latency time.Duration, shouldPing bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.UploadBytes = uploadBytes
-	t.DownloadBytes = downloadBytes
-	t.UploadSpeed = uploadSpeed
-	t.DownloadSpeed = downloadSpeed
-
-	if shouldPing && latency > 0 {
-		t.Latency = latency
-	}
-}
-
-func (t *Tunnel) CheckStatus() {
+func (t *Tunnel) ID() int {
 	t.mu.RLock()
-	status := t.Status
-	conn := t.Conn
-	t.mu.RUnlock()
+	defer t.mu.RUnlock()
+	return t.id
+}
 
-	if conn == nil {
-		return
+func (t *Tunnel) SSHConfig() *platform.SSHConfig {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if !t.hasSSHConfig {
+		return &platform.SSHConfig{}
 	}
-	switch status {
-	case StatusConnecting:
-		if conn.IsRunning() {
-			t.setStatusIfCurrent(StatusConnecting, StatusRunning, "")
-			return
-		}
-		if errMsg := conn.Error(); errMsg != "" {
-			t.setStatusIfCurrent(StatusConnecting, StatusError, errMsg)
-		}
-	case StatusRunning:
-		if conn.IsRunning() {
-			return
-		}
-		errMsg := conn.Error()
-		if errMsg == "" {
-			errMsg = "connection stopped"
-		}
-		t.setStatusIfCurrent(StatusRunning, StatusError, errMsg)
+	copy := t.sshConfig
+	return &copy
+}
+
+func (t *Tunnel) ForwardSpec() platform.ForwardSpec {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.forward
+}
+
+func (t *Tunnel) Snapshot() Snapshot {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var failure *platform.Failure
+	if t.failure != nil {
+		copy := *t.failure
+		failure = &copy
+	}
+	return Snapshot{
+		ID:            t.id,
+		Name:          t.name,
+		SSHConfig:     t.sshConfig,
+		HasSSHConfig:  t.hasSSHConfig,
+		Forward:       t.forward,
+		Status:        t.status,
+		Error:         failure.Error(),
+		Failure:       failure,
+		CreatedAt:     t.createdAt,
+		UploadBytes:   t.uploadBytes,
+		DownloadBytes: t.downloadBytes,
+		UploadSpeed:   t.uploadSpeed,
+		DownloadSpeed: t.downloadSpeed,
+		Latency:       t.latency,
+		LatencyKnown:  t.latencyKnown,
 	}
 }
 
 func (t *Tunnel) GetStatus() Status {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.Status
+	return t.Snapshot().Status
 }
 
 func (t *Tunnel) GetError() string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.Error
+	return t.Snapshot().Error
 }
 
 type StatsSnapshot struct {
@@ -275,64 +151,12 @@ type StatsSnapshot struct {
 }
 
 func (t *Tunnel) GetSnapshot() StatsSnapshot {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return StatsSnapshot{
-		UploadBytes:   t.UploadBytes,
-		DownloadBytes: t.DownloadBytes,
-	}
-}
-
-func (t *Tunnel) setStatus(status Status, errMsg string) {
-	t.mu.Lock()
-	t.Status = status
-	t.Error = errMsg
-	t.mu.Unlock()
-}
-
-func (t *Tunnel) setStatusIfCurrent(current, next Status, errMsg string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.Status != current {
-		return false
-	}
-	t.Status = next
-	t.Error = errMsg
-	return true
-}
-
-func (t *Tunnel) setConnection(conn platform.Connection) {
-	t.mu.Lock()
-	t.Conn = conn
-	t.mu.Unlock()
+	snapshot := t.Snapshot()
+	return StatsSnapshot{UploadBytes: snapshot.UploadBytes, DownloadBytes: snapshot.DownloadBytes}
 }
 
 func (t *Tunnel) GetConnection() platform.Connection {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.Conn
-}
-
-func (t *Tunnel) getConnection() platform.Connection {
-	return t.GetConnection()
-}
-
-func (m *Manager) GetSFTPClient(id int) (interface{}, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	for _, t := range m.Tunnels {
-		if t.ID == id {
-			if t.GetStatus() != StatusRunning {
-				return nil, fmt.Errorf("tunnel %d is not running", id)
-			}
-			conn := t.getConnection()
-			sc, ok := conn.(platform.SFTPCapable)
-			if !ok {
-				return nil, fmt.Errorf("tunnel %d does not support SFTP", id)
-			}
-			return sc.NewSFTPClient()
-		}
-	}
-	return nil, fmt.Errorf("tunnel %d not found", id)
+	return t.conn
 }

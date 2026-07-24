@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spance/intun/internal/logging"
 	"github.com/spance/intun/internal/udprelay"
 	"golang.org/x/crypto/ssh"
 )
@@ -73,10 +74,13 @@ func startRemoteUDPForward(conn *SSHConnection, client *ssh.Client, spec Forward
 		return err
 	}
 	transport := newCountingFrameTransport(remote.transport, &conn.totalUpload, &conn.totalDownload)
+	logLimiter := logging.NewRateLimiter(5 * time.Second)
 	serveTarget := func(ctx context.Context) error {
 		return udprelay.ServeTarget(ctx, transport, localTarget, udprelay.RelayOptions{}, udprelay.TargetHooks{
 			OnAssociationError: func(id uint32, err error) {
-				sshLog.Warn("UDP target association failed", "association_id", id, "error", err)
+				if allowed, suppressed := logLimiter.Allow("target-association"); allowed {
+					sshLog.Warn("UDP target association failed", "association_id", id, "error", err, "suppressed", suppressed)
+				}
 			},
 		})
 	}
@@ -96,12 +100,17 @@ func startRemoteUDPForward(conn *SSHConnection, client *ssh.Client, spec Forward
 }
 
 func localPeerHooks() udprelay.PeerHooks {
+	logLimiter := logging.NewRateLimiter(5 * time.Second)
 	return udprelay.PeerHooks{
 		OnDrop: func(peer *net.UDPAddr, err error) {
-			sshLog.Warn("dropping UDP datagram", "peer", peer.String(), "error", err)
+			if allowed, suppressed := logLimiter.Allow("peer-drop"); allowed {
+				sshLog.Warn("dropping UDP datagram", "peer", peer.String(), "error", err, "suppressed", suppressed)
+			}
 		},
 		OnAssociationError: func(id uint32, message string) {
-			sshLog.Warn("UDP association failed", "association_id", id, "error", strings.TrimSpace(message))
+			if allowed, suppressed := logLimiter.Allow("peer-association"); allowed {
+				sshLog.Warn("UDP association failed", "association_id", id, "error", strings.TrimSpace(message), "suppressed", suppressed)
+			}
 		},
 	}
 }

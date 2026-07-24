@@ -1,13 +1,8 @@
 package tui
 
 import (
-	"fmt"
-	"os"
-	"strings"
-
 	tea "charm.land/bubbletea/v2"
-	sftplib "github.com/pkg/sftp"
-	"github.com/spance/intun/internal/sftp"
+	"github.com/spance/intun/internal/platform"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -17,8 +12,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "c":
 		if len(m.hosts) == 0 {
-			m.err = fmt.Errorf("no hosts found in ~/.ssh/config")
-			return m, nil
+			return m.beginManualHostInput()
 		}
 		m.err = nil
 		m.screen = ScreenSelectHost
@@ -26,7 +20,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y":
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
 			t := tunnels[m.selectedIndex]
-			if t.Status == tunnel.StatusError && strings.Contains(t.Error, "HOST_KEY_NOT_CACHED") {
+			if t.Status == tunnel.StatusError && t.Failure != nil && t.Failure.Code == platform.FailureHostKeyNotCached {
 				m.manager.Restart(t.ID)
 			}
 		}
@@ -44,7 +38,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if t.Status == tunnel.StatusStopped {
 				m.manager.Restart(t.ID)
 			} else if t.Status == tunnel.StatusConnecting {
-				m.setStatusMsg("Cannot stop: tunnel is connecting")
+				m.manager.Stop(t.ID)
 			} else if t.Status == tunnel.StatusError {
 				m.setStatusMsg("Use [r] to reconnect")
 			}
@@ -64,51 +58,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(tunnels) > 0 && m.selectedIndex < len(tunnels) {
 			t := tunnels[m.selectedIndex]
 			if t.Status == tunnel.StatusRunning {
-				rawClient, err := m.manager.GetSFTPClient(t.ID)
-				if err != nil {
-					m.err = err
-					return m, nil
-				}
-				sftpRaw, ok := rawClient.(*sftplib.Client)
-				if !ok {
-					m.err = fmt.Errorf("invalid SFTP client type")
-					return m, nil
-				}
-				m.sftpClient = sftp.NewClient(sftpRaw)
-				cwd, _ := os.Getwd()
-				m.sftpLocalDir = cwd
-				remoteDir, _ := sftpRaw.Getwd()
-				if remoteDir == "" {
-					remoteDir = "/"
-				}
-				m.sftpRemoteDir = remoteDir
-				localFiles, lerr := sftp.ReadLocalDir(m.sftpLocalDir)
-				if lerr != nil {
-					m.err = lerr
-					m.sftpClient = nil
-					return m, nil
-				}
-				remoteFiles, rerr := m.sftpClient.ReadRemoteDir(m.sftpContext(), m.sftpRemoteDir)
-				if rerr != nil {
-					m.err = rerr
-					m.sftpClient = nil
-					return m, nil
-				}
-				m.sftpLocalFiles = localFiles
-				m.sftpRemoteFiles = remoteFiles
-				m.sftpFocus = 0
-				m.sftpCursor = [2]int{0, 0}
-				m.sftpScroll = [2]int{0, 0}
-				m = m.normalizeSFTPScroll()
-				m.sftpTransferring = false
-				m.sftpPreview = ""
-				m.sftpPreviewing = false
-				m.sftpCancel = nil
-				m.sftpTunnelID = t.ID
-				m.sftpHostLabel = fmt.Sprintf("%s@%s:%s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)
-				m.sftpDone = nil
-				m.sftpDirection = ""
-				m.screen = ScreenSFTP
+				return m.openSFTP(t)
 			} else {
 				m.setStatusMsg("Tunnel must be running to use SFTP")
 			}
@@ -135,7 +85,7 @@ func (m Model) handleMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) hasLiveTunnels() bool {
 	for _, t := range m.manager.List() {
-		status := t.GetStatus()
+		status := t.Status
 		if status == tunnel.StatusRunning || status == tunnel.StatusConnecting {
 			return true
 		}

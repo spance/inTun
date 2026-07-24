@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"errors"
+	"encoding/pem"
 	"io"
 	"net"
 	"os"
@@ -31,8 +31,8 @@ func TestTCPForwardAddr(t *testing.T) {
 		},
 		{
 			name: "host and port are preserved",
-			addr: "10.0.0.15:5551",
-			want: "10.0.0.15:5551",
+			addr: "192.0.2.15:5551",
+			want: "192.0.2.15:5551",
 		},
 		{
 			name: "localhost and port are preserved",
@@ -120,9 +120,9 @@ func TestSSHConnectionStateHelpers(t *testing.T) {
 
 	closer := &countingCloser{}
 	conn.addForward(closer)
-	conn.setExited()
+	conn.setError("closed")
 	if conn.IsRunning() {
-		t.Fatal("setExited should mark connection not running")
+		t.Fatal("setError should mark connection not running")
 	}
 	if len(conn.forwards) != 1 {
 		t.Fatalf("forward count = %d, want 1", len(conn.forwards))
@@ -270,8 +270,8 @@ func TestDynamicForwardReturnsFailureWithoutSSHClient(t *testing.T) {
 	if _, err := io.ReadFull(client, reply); err != nil {
 		t.Fatal(err)
 	}
-	if reply[0] != 0x05 || reply[1] != 0x05 {
-		t.Fatalf("SOCKS reply = %#v, want connection failure", reply)
+	if reply[0] != 0x05 || reply[1] != socksHostFail {
+		t.Fatalf("SOCKS reply = %#v, want host failure", reply)
 	}
 	client.Close()
 
@@ -300,7 +300,7 @@ func TestDynamicForwardRejectsUnsupportedCommand(t *testing.T) {
 	if _, err := io.ReadFull(client, greeting); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Write([]byte{0x05, 0x02, 0x00, 0x01, 127, 0, 0, 1, 0, 80}); err != nil {
+	if _, err := client.Write([]byte{0x05, 0x02, 0x00, 0x01}); err != nil {
 		t.Fatal(err)
 	}
 	reply := make([]byte, 10)
@@ -422,72 +422,6 @@ func TestSSHExecutorConnectEarlyFailures(t *testing.T) {
 	waitForConnectionError(t, conn, "no host specified")
 }
 
-func TestMockConnectionAndExecutor(t *testing.T) {
-	conn := NewMockConnection()
-	var stopped int
-	conn.OnStop = func() { stopped++ }
-	if !conn.IsRunning() {
-		t.Fatal("new mock connection should start running")
-	}
-	conn.SetError("boom")
-	if conn.Error() != "boom" {
-		t.Fatalf("mock error = %q, want boom", conn.Error())
-	}
-	if conn.IsRunning() {
-		t.Fatal("SetError should mark mock connection stopped")
-	}
-	conn.SetRunning(true)
-	if !conn.IsRunning() {
-		t.Fatal("SetRunning(true) should mark mock connection running")
-	}
-	conn.OnIsRunning = func() bool { return false }
-	if conn.IsRunning() {
-		t.Fatal("OnIsRunning override should be used")
-	}
-	conn.OnIsRunning = nil
-	conn.SetStats(7, 9)
-	conn.SetPing(15 * time.Millisecond)
-	up, down := conn.GetStats()
-	if up != 7 || down != 9 {
-		t.Fatalf("mock stats = %d/%d, want 7/9", up, down)
-	}
-	if got := conn.Ping(); got != 15*time.Millisecond {
-		t.Fatalf("mock ping = %v, want 15ms", got)
-	}
-	if err := conn.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	_ = conn.Stop()
-	if stopped != 1 {
-		t.Fatalf("OnStop count = %d, want 1", stopped)
-	}
-
-	exec := NewMockExecutor()
-	cfg := &SSHConfig{Host: "example.com"}
-	gotConn, err := exec.Connect(nil, cfg, ForwardSpec{Type: Local, Protocol: TCP, LocalAddr: "1", RemoteAddr: "2"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotConn == nil || exec.GetCallCount() != 1 || exec.GetLastConnection() == nil {
-		t.Fatalf("mock executor did not record connection")
-	}
-
-	exec.ConnectFn = func(cfg *SSHConfig, spec ForwardSpec) (*MockConnection, error) {
-		if cfg.Host != "example.com" || spec.Type != Remote || spec.LocalAddr != "3" || spec.RemoteAddr != "4" {
-			return nil, errors.New("unexpected args")
-		}
-		return NewMockConnection(), nil
-	}
-	if _, err := exec.Connect(nil, cfg, ForwardSpec{Type: Remote, Protocol: TCP, LocalAddr: "3", RemoteAddr: "4"}); err != nil {
-		t.Fatal(err)
-	}
-
-	exec.ConnectErr = ErrAuthFailed
-	if _, err := exec.Connect(nil, cfg, ForwardSpec{Type: Local, Protocol: TCP}); !errors.Is(err, ErrAuthFailed) {
-		t.Fatalf("Connect error = %v, want ErrAuthFailed", err)
-	}
-}
-
 func TestNewKnownHostsCreatesFileAndAcceptsUnknownHost(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -535,17 +469,43 @@ func TestKnownHostsRejectsUnknownHost(t *testing.T) {
 	}
 	key := testPublicKey(t)
 	reqCh := make(chan AuthRequest, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	go func() {
 		req := <-reqCh
 		req.Response <- AuthResponse{Accept: false}
 	}()
 
-	err := kh.GetHostKeyCallback(&AuthContext{RequestChan: reqCh, Cancel: ctx, Timeout: time.Second}, 7)("reject.example:22", nil, key)
+	err := kh.VerifyHostKey(&AuthContext{RequestChan: reqCh, Timeout: time.Second}, 7, "reject.example", "22", key)
 	if err == nil || !strings.Contains(err.Error(), "host key rejected") {
 		t.Fatalf("reject error = %v, want host key rejected", err)
+	}
+}
+
+func TestKnownHostsFormatsIPv6PromptWithPort(t *testing.T) {
+	kh := &KnownHosts{path: filepath.Join(t.TempDir(), "known_hosts")}
+	if err := os.WriteFile(kh.path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	key := testPublicKey(t)
+	reqCh := make(chan AuthRequest, 1)
+	go func() {
+		req := <-reqCh
+		if req.Host != "[2001:db8::1]:22" {
+			req.Response <- AuthResponse{Accept: false}
+			return
+		}
+		req.Response <- AuthResponse{Accept: true}
+	}()
+
+	if err := kh.VerifyHostKey(&AuthContext{RequestChan: reqCh, Timeout: time.Second}, 8, "2001:db8::1", "22", key); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(kh.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "2001:db8::1 ssh-ed25519") {
+		t.Fatalf("known_hosts entry does not contain normalized IPv6: %q", data)
 	}
 }
 
@@ -565,44 +525,52 @@ func TestKnownHostsRequiresAuthContextForUnknownHost(t *testing.T) {
 	}
 }
 
-func TestExpandPathAndLoadPrivateKeyErrors(t *testing.T) {
+func TestExpandSSHPathAndLoadPrivateKeyErrors(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skipf("home unavailable: %v", err)
 	}
-	if got := expandPath("~/identity"); got != filepath.Join(home, "identity") {
-		t.Fatalf("expandPath = %q, want home identity", got)
+	if got := expandPathAndEnv("~/identity"); got != filepath.Join(home, "identity") {
+		t.Fatalf("expandPathAndEnv = %q, want home identity", got)
 	}
-	if got := expandPath("/tmp/identity"); got != "/tmp/identity" {
-		t.Fatalf("absolute expandPath = %q", got)
+	if got := expandPathAndEnv("/tmp/identity"); got != "/tmp/identity" {
+		t.Fatalf("absolute expandPathAndEnv = %q", got)
+	}
+	cfg := &SSHConfig{Host: "server.example.com", Port: "2222", User: "remote-user"}
+	wantTokenPath := filepath.Join(home, ".ssh", "server.example.com-2222-remote-user-%")
+	if got := expandSSHPath("%d/.ssh/%h-%p-%r-%%", cfg); got != wantTokenPath {
+		t.Fatalf("expandSSHPath = %q, want %q", got, wantTokenPath)
 	}
 
 	exec := &SSHExecutor{}
-	if _, err := exec.loadPrivateKey(filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("loadPrivateKey should reject missing file")
+	if _, err := exec.loadPrivateKeyWithPrompt(filepath.Join(t.TempDir(), "missing"), nil, 0, "", ""); err == nil {
+		t.Fatal("loadPrivateKeyWithPrompt should reject missing file")
 	}
 	invalid := filepath.Join(t.TempDir(), "bad-key")
 	if err := os.WriteFile(invalid, []byte("not a key"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.loadPrivateKey(invalid); err == nil {
-		t.Fatal("loadPrivateKey should reject invalid key content")
+	if _, err := exec.loadPrivateKeyWithPrompt(invalid, nil, 0, "", ""); err == nil {
+		t.Fatal("loadPrivateKeyWithPrompt should reject invalid key content")
 	}
 }
 
 func TestGetAuthMethodsRequiresAvailableMethod(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SSH_AUTH_SOCK", "")
 
 	exec := &SSHExecutor{}
-	if _, err := exec.getAuthMethods("", nil, 1, "user", "host"); err == nil || !strings.Contains(err.Error(), "no auth methods") {
+	cfg := &SSHConfig{User: "user", Host: "host"}
+	if _, _, err := exec.getAuthMethods(cfg, nil, 1); err == nil || !strings.Contains(err.Error(), "no auth methods") {
 		t.Fatalf("getAuthMethods without keys/auth context error = %v, want no auth methods", err)
 	}
 
-	methods, err := exec.getAuthMethods("", &AuthContext{
+	methods, closers, err := exec.getAuthMethods(cfg, &AuthContext{
 		RequestChan: make(chan AuthRequest),
 		Cancel:      context.Background(),
 		Timeout:     time.Second,
-	}, 1, "user", "host")
+	}, 1)
+	defer closeAll(closers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,14 +579,59 @@ func TestGetAuthMethodsRequiresAvailableMethod(t *testing.T) {
 	}
 }
 
+func TestLoadEncryptedPrivateKeyPromptsForPassphrase(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(privateKey, "test", []byte("correct"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "encrypted-key")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(block), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requests := make(chan AuthRequest)
+	go func() {
+		for attempt := 0; attempt < 2; attempt++ {
+			req := <-requests
+			if req.Type != AuthRequestPassphrase || req.RetryCount != attempt {
+				req.Response <- AuthResponse{}
+				continue
+			}
+			passphrase := "wrong"
+			if attempt == 1 {
+				passphrase = "correct"
+			}
+			req.Response <- AuthResponse{Accept: true, Password: passphrase}
+		}
+	}()
+	exec := &SSHExecutor{}
+	signer, err := exec.loadPrivateKeyWithPrompt(keyPath, &AuthContext{
+		RequestChan: requests,
+		Cancel:      ctx,
+		Timeout:     time.Second,
+	}, 9, "user", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signer == nil {
+		t.Fatal("encrypted key did not produce a signer")
+	}
+}
+
 func TestPromptPasswordCancellationAndResponse(t *testing.T) {
 	exec := &SSHExecutor{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cancelReqCh := make(chan AuthRequest)
-	_, err := exec.promptPassword(&AuthContext{RequestChan: cancelReqCh, Cancel: ctx, Timeout: time.Millisecond}, 7, "user", "host")
+	_, err := exec.promptSecret(&AuthContext{RequestChan: cancelReqCh, Cancel: ctx, Timeout: time.Millisecond}, 7, AuthRequestPassword, "user@host", 0)
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
-		t.Fatalf("promptPassword cancelled error = %v", err)
+		t.Fatalf("promptSecret cancelled error = %v", err)
 	}
 
 	reqCh := make(chan AuthRequest, 1)
@@ -632,7 +645,7 @@ func TestPromptPasswordCancellationAndResponse(t *testing.T) {
 		}
 		req.Response <- AuthResponse{Accept: true, Password: "secret"}
 	}()
-	password, err := exec.promptPassword(&AuthContext{RequestChan: reqCh, Cancel: ctx, Timeout: time.Second}, 8, "user", "host")
+	password, err := exec.promptSecret(&AuthContext{RequestChan: reqCh, Cancel: ctx, Timeout: time.Second}, 8, AuthRequestPassword, "user@host", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +664,7 @@ func TestKeyboardInteractiveUsesPasswordForAllQuestions(t *testing.T) {
 		req.Response <- AuthResponse{Accept: true, Password: "answer"}
 	}()
 
-	answers, err := exec.handleKeyboardInteractive(&AuthContext{RequestChan: reqCh, Cancel: ctx, Timeout: time.Second}, 1, "user", "host", []string{"one", "two"}, nil)
+	answers, err := exec.handleKeyboardInteractive(&AuthContext{RequestChan: reqCh, Cancel: ctx, Timeout: time.Second}, 1, "user", "host", []string{"one", "two"}, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

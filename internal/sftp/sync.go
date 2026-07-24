@@ -1,48 +1,15 @@
 package sftp
 
-import (
-	"context"
-	"fmt"
-	"os"
-)
+import "context"
 
 func (s *Client) DownloadDir(ctx context.Context, sourceRemoteDir, localDir string, progress func(done, total int64, file string)) (TransferReport, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var report TransferReport
-	if err := checkCanceled(ctx); err != nil {
-		return report, err
-	}
-	if !allowLocalDirectoryTarget(localDir, &report) {
-		return report, nil
-	}
-
-	totalSize, err := s.remoteRegularFileTotal(ctx, sourceRemoteDir, map[string]struct{}{})
-	if err != nil {
-		return report, err
-	}
-
-	var done int64
-	err = s.downloadRemoteEntry(ctx, sourceRemoteDir, sourceRemoteDir, localDir, map[string]struct{}{}, &report, &done, totalSize, progress)
-	if err != nil {
-		return report, err
-	}
-	return report, nil
+	return s.DownloadDirWithOptions(ctx, sourceRemoteDir, localDir, TransferOptions{}, progress)
 }
 
-func allowLocalDirectoryTarget(localDir string, report *TransferReport) bool {
-	info, err := os.Lstat(localDir)
-	if os.IsNotExist(err) {
-		return true
-	}
+func (s *Client) DownloadDirWithOptions(ctx context.Context, sourceRemoteDir, localDir string, options TransferOptions, progress func(done, total int64, file string)) (TransferReport, error) {
+	plan, err := s.PlanDownloadDir(ctx, sourceRemoteDir, localDir)
 	if err != nil {
-		report.addSkipped(localDir, fmt.Sprintf("verify local target: %v", err))
-		return false
+		return plan.Report, err
 	}
-	if info.IsDir() {
-		return true
-	}
-	report.addSkipped(localDir, fmt.Sprintf("target exists as %s", existingItemKind(info)))
-	return false
+	return s.ExecuteSyncPlan(ctx, plan, options, progress)
 }

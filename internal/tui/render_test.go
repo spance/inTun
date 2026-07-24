@@ -8,10 +8,12 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
 	"github.com/spance/intun/internal/sftp"
+	"github.com/spance/intun/internal/testutil"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -22,16 +24,28 @@ func stripANSI(s string) string {
 }
 
 func newTestModelWithTunnel() Model {
+	return newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type:       tunnel.Local,
+		Protocol:   tunnel.TCP,
+		LocalAddr:  "8080",
+		RemoteAddr: "80",
+	}, testutil.NewMockConnection())
+}
+
+func newTestModelWithTunnelSpec(name string, spec platform.ForwardSpec, conn *testutil.MockConnection) Model {
 	hosts := []config.Host{{Name: "test", Hostname: "example.com", User: "user", Port: "22"}}
 	m := NewModel(hosts, tunnel.NewManager(nil), "v1.0.0")
 	m.width = 120
 	m.height = 30
 
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, got platform.ForwardSpec) (*testutil.MockConnection, error) {
+		return conn, nil
+	}
 	m.manager.SetExecutor(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
-	m.manager.Create("test-tunnel", cfg, tunnel.Local, "8080", "80")
+	m.manager.CreateWithProtocol(name, cfg, spec.Type, spec.Protocol, spec.LocalAddr, spec.RemoteAddr)
 
 	return m
 }
@@ -62,6 +76,36 @@ func TestViewContainsShortcuts(t *testing.T) {
 	}
 }
 
+func TestConnectingTunnelCanBeStopped(t *testing.T) {
+	conn := testutil.NewMockConnection()
+	conn.SetRunning(false)
+	m := newTestModelWithTunnelSpec("connecting", platform.ForwardSpec{
+		Type:       tunnel.Local,
+		Protocol:   tunnel.TCP,
+		LocalAddr:  "8080",
+		RemoteAddr: "80",
+	}, conn)
+
+	shortcuts := stripANSI(m.renderShortcuts())
+	if !strings.Contains(shortcuts, "Connecting") || !strings.Contains(shortcuts, "Stop") {
+		t.Fatalf("connecting shortcuts should expose cancellation: %q", shortcuts)
+	}
+	m = updateModel(m, keyMsg("s"))
+	snapshot := m.manager.List()[0]
+	if snapshot.Status != tunnel.StatusStopped || conn.IsRunning() {
+		t.Fatalf("stop connecting result = status:%v running:%v", snapshot.Status, conn.IsRunning())
+	}
+}
+
+func TestControlCRequestsExitFromSFTPScreen(t *testing.T) {
+	m := newTestModelWithTunnel()
+	m.screen = ScreenSFTP
+	m = updateModel(m, tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	if !m.confirmQuit {
+		t.Fatal("Ctrl+C in SFTP should open the exit confirmation")
+	}
+}
+
 func TestViewTunnelList(t *testing.T) {
 	m := newTestModelWithTunnel()
 	output := m.View().Content
@@ -82,25 +126,24 @@ func TestViewTunnelList(t *testing.T) {
 }
 
 func TestTunnelRouteTextExplainsEndpointDirection(t *testing.T) {
-	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	tests := []struct {
 		name string
-		tun  *tunnel.Tunnel
+		tun  tunnel.Snapshot
 		want string
 	}{
 		{
 			name: "local forward",
-			tun:  &tunnel.Tunnel{SSHConfig: cfg, Forward: platform.ForwardSpec{Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "9090", RemoteAddr: "22"}},
+			tun:  tunnel.Snapshot{Forward: platform.ForwardSpec{Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "9090", RemoteAddr: "22"}},
 			want: "127.0.0.1:9090 -> REMOTE 127.0.0.1:22",
 		},
 		{
 			name: "remote forward",
-			tun:  &tunnel.Tunnel{SSHConfig: cfg, Forward: platform.ForwardSpec{Type: tunnel.Remote, Protocol: tunnel.TCP, LocalAddr: "127.0.0.1:22", RemoteAddr: "0.0.0.0:9090"}},
+			tun:  tunnel.Snapshot{Forward: platform.ForwardSpec{Type: tunnel.Remote, Protocol: tunnel.TCP, LocalAddr: "127.0.0.1:22", RemoteAddr: "0.0.0.0:9090"}},
 			want: "0.0.0.0:9090 -> LOCAL 127.0.0.1:22",
 		},
 		{
 			name: "dynamic forward",
-			tun:  &tunnel.Tunnel{SSHConfig: cfg, Forward: platform.ForwardSpec{Type: tunnel.Dynamic, Protocol: tunnel.TCP, LocalAddr: "1080"}},
+			tun:  tunnel.Snapshot{Forward: platform.ForwardSpec{Type: tunnel.Dynamic, Protocol: tunnel.TCP, LocalAddr: "1080"}},
 			want: "127.0.0.1:1080 -> SOCKS5",
 		},
 	}
@@ -125,10 +168,10 @@ func TestRenderTunnelRouteTextHighlightsEndpointLabels(t *testing.T) {
 }
 
 func TestViewDoesNotPrefixHostPortAddressWithExtraColon(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.Forward.LocalAddr = "127.0.0.1:5555"
-	tun.Forward.RemoteAddr = "192.0.2.15:5551"
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP,
+		LocalAddr: "127.0.0.1:5555", RemoteAddr: "192.0.2.15:5551",
+	}, testutil.NewMockConnection())
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -148,13 +191,12 @@ func TestViewDoesNotPrefixHostPortAddressWithExtraColon(t *testing.T) {
 }
 
 func TestViewTableFitsMinimumWidth(t *testing.T) {
-	m := newTestModelWithTunnel()
+	m := newTestModelWithTunnelSpec("very-long-production-tunnel-name-that-needs-truncation", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP,
+		LocalAddr: "127.0.0.1:555555555555", RemoteAddr: "192.0.2.15:555155555555",
+	}, testutil.NewMockConnection())
 	m.width = 80
 	m.height = 20
-	tun := m.manager.List()[0]
-	tun.Name = "very-long-production-tunnel-name-that-needs-truncation"
-	tun.Forward.LocalAddr = "127.0.0.1:555555555555"
-	tun.Forward.RemoteAddr = "192.0.2.15:555155555555"
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -196,10 +238,12 @@ func TestViewDisplaysModelError(t *testing.T) {
 }
 
 func TestViewTunnelStatus(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-
-	tun.UpdateStats(1024, 2048, 100, 200, 50*1000000, false)
+	conn := testutil.NewMockConnection()
+	conn.SetStats(1024, 2048)
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
+	m.manager.Refresh(false, time.Second)
 	output := m.View().Content
 	clean := stripANSI(output)
 
@@ -212,11 +256,11 @@ func TestViewTunnelStatus(t *testing.T) {
 }
 
 func TestViewErrorState(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-
-	tun.Status = tunnel.StatusError
-	tun.Error = "SSH_CONNECTION_FAILED: connection refused"
+	conn := testutil.NewMockConnection()
+	conn.SetError("SSH_CONNECTION_FAILED: connection refused")
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -230,11 +274,11 @@ func TestViewErrorState(t *testing.T) {
 }
 
 func TestViewHostKeyError(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-
-	tun.Status = tunnel.StatusError
-	tun.Error = "HOST_KEY_NOT_CACHED: unknown host"
+	conn := testutil.NewMockConnection()
+	conn.SetError("HOST_KEY_NOT_CACHED: unknown host")
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -245,11 +289,11 @@ func TestViewHostKeyError(t *testing.T) {
 }
 
 func TestViewAuthError(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-
-	tun.Status = tunnel.StatusError
-	tun.Error = "SSH_AUTH_FAILED: no valid key"
+	conn := testutil.NewMockConnection()
+	conn.SetError("SSH_AUTH_FAILED: no valid key")
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -263,11 +307,11 @@ func TestViewAuthError(t *testing.T) {
 }
 
 func TestViewConnectionLostShowsDetail(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-
-	tun.Status = tunnel.StatusError
-	tun.Error = "SSH_CONNECTION_LOST: EOF"
+	conn := testutil.NewMockConnection()
+	conn.SetError("SSH_CONNECTION_LOST: EOF")
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -357,16 +401,14 @@ func TestUDPTypeLabelIncludesProtocol(t *testing.T) {
 }
 
 func TestViewRendersLocalUDPRouteAndRelayHint(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.Forward = platform.ForwardSpec{
+	conn := testutil.NewMockConnection()
+	conn.SetError("UDP_RELAY_FAILED: executable file not found")
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
 		Type:       tunnel.Local,
 		Protocol:   tunnel.UDP,
 		LocalAddr:  "127.0.0.1:5353",
 		RemoteAddr: "127.0.0.1:53",
-	}
-	tun.Status = tunnel.StatusError
-	tun.Error = "UDP_RELAY_FAILED: executable file not found"
+	}, conn)
 	m.width = 160
 	m.height = 24
 
@@ -391,14 +433,12 @@ func TestViewRendersLocalUDPRouteAndRelayHint(t *testing.T) {
 }
 
 func TestViewRendersRemoteUDPDirection(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.Forward = platform.ForwardSpec{
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
 		Type:       tunnel.Remote,
 		Protocol:   tunnel.UDP,
 		LocalAddr:  "127.0.0.1:53",
 		RemoteAddr: "0.0.0.0:5353",
-	}
+	}, testutil.NewMockConnection())
 	m.width = 160
 	m.height = 20
 
@@ -530,7 +570,7 @@ func TestRenderModalKeepsBorderAligned(t *testing.T) {
 		"this line is intentionally much longer than the modal content width and should be clipped",
 	}, "\n")
 
-	clean := stripANSI(renderModal(80, body, 56).String())
+	clean := stripANSI(renderModal(80, body, 56).content)
 	lines := strings.Split(clean, "\n")
 
 	for _, line := range lines {
@@ -661,10 +701,12 @@ func TestViewSelectedTunnel(t *testing.T) {
 }
 
 func TestViewLatencyDisplay(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-
-	tun.Latency = 45 * 1000000 // 45ms
+	conn := testutil.NewMockConnection()
+	conn.SetPing(45 * time.Millisecond)
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
+	m.manager.Refresh(true, time.Second)
 	output := m.View().Content
 	clean := stripANSI(output)
 
@@ -675,8 +717,9 @@ func TestViewLatencyDisplay(t *testing.T) {
 
 func TestViewStoppedTunnel(t *testing.T) {
 	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.Status = tunnel.StatusStopped
+	if err := m.manager.Stop(m.manager.List()[0].ID); err != nil {
+		t.Fatal(err)
+	}
 
 	output := m.View().Content
 	clean := stripANSI(output)
@@ -861,14 +904,17 @@ func TestRenderShortcutsDoesNotLeaveTrailingSeparator(t *testing.T) {
 func TestRenderMainShortcutsFollowSelectedTunnelState(t *testing.T) {
 	m := newTestModelWithTunnel()
 	m.width = 120
-	tun := m.manager.List()[0]
 
 	running := stripANSI(m.renderShortcuts())
 	if !strings.Contains(running, "SFTP") || !strings.Contains(running, "Stop") {
 		t.Fatalf("running tunnel shortcuts should prioritize SFTP and Stop: %q", running)
 	}
 
-	tun.Status = tunnel.StatusError
+	errorConn := testutil.NewMockConnection()
+	errorConn.SetError("SSH_CONNECTION_FAILED: refused")
+	m = newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, errorConn)
 	errored := stripANSI(m.renderShortcuts())
 	if !strings.Contains(errored, "Reconnect") {
 		t.Fatalf("error tunnel shortcuts should prioritize reconnect: %q", errored)
@@ -877,7 +923,9 @@ func TestRenderMainShortcutsFollowSelectedTunnelState(t *testing.T) {
 		t.Fatalf("error tunnel shortcuts should hide running-only actions: %q", errored)
 	}
 
-	tun.Status = tunnel.StatusStopped
+	if err := m.manager.Stop(m.manager.List()[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	stopped := stripANSI(m.renderShortcuts())
 	if !strings.Contains(stopped, "Start") {
 		t.Fatalf("stopped tunnel shortcuts should show Start: %q", stopped)
@@ -906,8 +954,6 @@ func TestViewSFTPStatusUsesModalMask(t *testing.T) {
 
 func TestQuitConfirmWithRunningTunnel(t *testing.T) {
 	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.Status = tunnel.StatusRunning
 	output := m.View().Content
 	clean := stripANSI(output)
 	if strings.Contains(clean, "Active tunnels are still running") {
@@ -1006,9 +1052,13 @@ func TestViewSFTPLayoutFitsNarrowWidth(t *testing.T) {
 }
 
 func TestRenderTunnelSummaryFitsWidth(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.UpdateStats(1024, 2048, 100, 200, 50*time.Millisecond, true)
+	conn := testutil.NewMockConnection()
+	conn.SetStats(1024, 2048)
+	conn.SetPing(50 * time.Millisecond)
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
+	m.manager.Refresh(true, time.Second)
 
 	clean := stripANSI(m.renderTunnelSummary(80, 1))
 	for _, line := range strings.Split(clean, "\n") {
@@ -1019,7 +1069,7 @@ func TestRenderTunnelSummaryFitsWidth(t *testing.T) {
 }
 
 func TestRenderTunnelFlowLineSuspendsWhenNotRunning(t *testing.T) {
-	tun := &tunnel.Tunnel{Status: tunnel.StatusError, Error: "failed"}
+	tun := tunnel.Snapshot{Status: tunnel.StatusError, Error: "failed"}
 	clean := stripANSI(renderTunnelFlowLine(tun, []int64{1, 2, 3}, 40))
 	if !strings.Contains(clean, "flow paused") {
 		t.Fatalf("error tunnel should show paused flow state: %q", clean)
@@ -1030,9 +1080,11 @@ func TestRenderTunnelFlowLineSuspendsWhenNotRunning(t *testing.T) {
 }
 
 func TestViewConnectingTunnel(t *testing.T) {
-	m := newTestModelWithTunnel()
-	tun := m.manager.List()[0]
-	tun.Status = tunnel.StatusConnecting
+	conn := testutil.NewMockConnection()
+	conn.SetRunning(false)
+	m := newTestModelWithTunnelSpec("test-tunnel", platform.ForwardSpec{
+		Type: tunnel.Local, Protocol: tunnel.TCP, LocalAddr: "8080", RemoteAddr: "80",
+	}, conn)
 
 	output := m.View().Content
 	clean := stripANSI(output)

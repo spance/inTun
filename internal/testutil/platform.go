@@ -1,9 +1,11 @@
-package platform
+package testutil
 
 import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/spance/intun/internal/platform"
 )
 
 type MockConnection struct {
@@ -94,7 +96,8 @@ func (m *MockConnection) SetPing(d time.Duration) {
 type MockExecutor struct {
 	ConnectErr       error
 	Connections      []*MockConnection
-	ConnectFn        func(cfg *SSHConfig, spec ForwardSpec) (*MockConnection, error)
+	ConnectFn        func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*MockConnection, error)
+	ConnectContextFn func(ctx *platform.AuthContext, cfg *platform.SSHConfig, spec platform.ForwardSpec) (*MockConnection, error)
 	mu               sync.Mutex
 	connectCallCount int
 }
@@ -103,7 +106,7 @@ func NewMockExecutor() *MockExecutor {
 	return &MockExecutor{}
 }
 
-func (e *MockExecutor) Connect(ctx *AuthContext, cfg *SSHConfig, spec ForwardSpec) (Connection, error) {
+func (e *MockExecutor) Connect(ctx *platform.AuthContext, cfg *platform.SSHConfig, spec platform.ForwardSpec) (platform.Connection, error) {
 	e.mu.Lock()
 	e.connectCallCount++
 	e.mu.Unlock()
@@ -112,6 +115,9 @@ func (e *MockExecutor) Connect(ctx *AuthContext, cfg *SSHConfig, spec ForwardSpe
 		return nil, e.ConnectErr
 	}
 
+	if e.ConnectContextFn != nil {
+		return e.ConnectContextFn(ctx, cfg, spec)
+	}
 	if e.ConnectFn != nil {
 		return e.ConnectFn(cfg, spec)
 	}

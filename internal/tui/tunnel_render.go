@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/spance/intun/internal/platform"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -13,7 +14,7 @@ func (m Model) renderTunnelSummary(width int, total int) string {
 	var running, connecting, stopped, errored int
 	var tx, rx int64
 	for _, t := range m.manager.List() {
-		switch t.GetStatus() {
+		switch t.Status {
 		case tunnel.StatusRunning:
 			running++
 		case tunnel.StatusConnecting:
@@ -66,7 +67,7 @@ func metricPill(label, value string, valueStyle lipgloss.Style, emphasized bool)
 	return style.Render(eyebrowStyle.Render(label) + " " + valueStyle.Bold(true).Render(value))
 }
 
-func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) string {
+func (m Model) renderTunnelRow(t tunnel.Snapshot, idx, width int, focused bool) string {
 	status := tunnelStatusLabel(t)
 	borderColor := colorSurface
 	if status == "Error" {
@@ -83,7 +84,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	rowAccentStyle := accentStyle
 	rowSelectedStyle := selectedStyle
 	latency := "-"
-	if t.Latency > 0 {
+	if t.LatencyKnown {
 		latency = fmt.Sprintf("%dms", t.Latency.Milliseconds())
 	}
 	statusBadge := lipgloss.NewStyle().
@@ -143,7 +144,7 @@ func (m Model) renderTunnelRow(t *tunnel.Tunnel, idx, width int, focused bool) s
 	return rowStyle.Render(strings.Join(lines, "\n"))
 }
 
-func tunnelRouteText(t *tunnel.Tunnel) string {
+func tunnelRouteText(t tunnel.Snapshot) string {
 	local := formatTunnelAddr(t.Forward.LocalAddr)
 	remote := formatTunnelAddr(t.Forward.RemoteAddr)
 	switch t.Forward.Type {
@@ -180,8 +181,8 @@ func renderTunnelRouteText(route string) string {
 	return b.String()
 }
 
-func renderTunnelFlowLine(t *tunnel.Tunnel, history []int64, width int) string {
-	switch t.GetStatus() {
+func renderTunnelFlowLine(t tunnel.Snapshot, history []int64, width int) string {
+	switch t.Status {
 	case tunnel.StatusRunning, tunnel.StatusConnecting:
 		return renderTrafficFlow(history, width)
 	case tunnel.StatusError:
@@ -244,7 +245,7 @@ func renderTrafficFlow(history []int64, width int) string {
 	return b.String()
 }
 
-func tunnelStatusLabel(t *tunnel.Tunnel) string {
+func tunnelStatusLabel(t tunnel.Snapshot) string {
 	switch t.Status {
 	case tunnel.StatusRunning:
 		return "Running"
@@ -281,23 +282,30 @@ func statusColor(status string) color.Color {
 	}
 }
 
-func renderTunnelErrorHint(t *tunnel.Tunnel, width int) []string {
+func renderTunnelErrorHint(t tunnel.Snapshot, width int) []string {
 	errMsg := t.Error
-	switch {
-	case strings.Contains(errMsg, "SSH_AUTH_FAILED"):
+	code := platform.FailureUnknown
+	if t.Failure != nil {
+		code = t.Failure.Code
+	}
+	switch code {
+	case platform.FailureSSHAuth:
 		return []string{
 			dangerStyle.Render("Authentication failed. Check SSH key:"),
 			mutedStyle.Render("Ensure valid key in ~/.ssh/id_rsa or ~/.ssh/id_ed25519, or specify IdentityFile in ~/.ssh/config"),
 		}
-	case strings.Contains(errMsg, "SSH_CONNECTION_FAILED"):
+	case platform.FailureSSHConnection:
 		return []string{dangerStyle.Render("Connection failed:"), mutedStyle.Render(truncate(errMsg, width))}
-	case strings.Contains(errMsg, "HOST_KEY_NOT_CACHED"):
+	case platform.FailureHostKeyNotCached:
 		return []string{
 			dangerStyle.Render("Host key not cached. Run manually:"),
 			selectedStyle.Render(fmt.Sprintf("ssh %s@%s -p %s", t.SSHConfig.User, t.SSHConfig.Host, t.SSHConfig.Port)),
 		}
-	case strings.Contains(errMsg, "SSH_CONNECTION_LOST"):
-		detail := strings.TrimSpace(strings.TrimPrefix(errMsg, "SSH_CONNECTION_LOST:"))
+	case platform.FailureSSHConnectionLost, platform.FailureSSHKeepalive:
+		detail := ""
+		if t.Failure != nil {
+			detail = strings.TrimSpace(t.Failure.Detail)
+		}
 		if detail == "" {
 			return []string{dangerStyle.Render("SSH connection lost - press 'r' to reconnect")}
 		}
@@ -305,7 +313,7 @@ func renderTunnelErrorHint(t *tunnel.Tunnel, width int) []string {
 			dangerStyle.Render("SSH connection lost - press 'r' to reconnect"),
 			mutedStyle.Render(truncate(detail, width)),
 		}
-	case strings.Contains(errMsg, "UDP_RELAY_FAILED"):
+	case platform.FailureUDPRelay:
 		return []string{
 			dangerStyle.Render("Remote UDP relay unavailable:"),
 			mutedStyle.Render(truncate(errMsg, width)),

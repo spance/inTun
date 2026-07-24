@@ -3,17 +3,16 @@ package sftp
 import (
 	"context"
 	"io"
-	"os/exec"
-	"strings"
+	"net/http"
+	"unicode/utf8"
 )
 
 func (s *Client) Preview(ctx context.Context, path string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := checkCanceled(ctx); err != nil {
+	_, done, err := s.beginOperation(ctx)
+	if err != nil {
 		return "", err
 	}
+	defer done()
 
 	r, err := s.client.Open(path)
 	if err != nil {
@@ -32,30 +31,24 @@ func (s *Client) Preview(ctx context.Context, path string) (string, error) {
 		return "", err
 	}
 
-	content := string(buf[:n])
-	if !isBinary(content) {
-		return content, nil
+	content := buf[:n]
+	if !isBinaryBytes(content) {
+		return string(content), nil
 	}
 
 	if n > 0 {
-		cmd := exec.CommandContext(ctx, "file", "-")
-		cmd.Stdin = strings.NewReader(string(buf[:n]))
-		out, err := cmd.Output()
-		if err == nil && len(out) > 0 {
-			result := strings.TrimSpace(string(out))
-			if idx := strings.Index(result, ": "); idx >= 0 {
-				result = result[idx+2:]
-			}
-			return "[binary] " + result, nil
-		}
+		return "[binary] " + http.DetectContentType(content), nil
 	}
 
 	return "[binary file]", nil
 }
 
-func isBinary(s string) bool {
-	for _, r := range s {
-		if r == 0 {
+func isBinaryBytes(data []byte) bool {
+	if !utf8.Valid(data) {
+		return true
+	}
+	for _, value := range data {
+		if value == 0 {
 			return true
 		}
 	}

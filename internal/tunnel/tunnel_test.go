@@ -1,13 +1,17 @@
 package tunnel
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/spance/intun/internal/platform"
+	"github.com/spance/intun/internal/testutil"
 )
 
 func TestStatusString(t *testing.T) {
@@ -54,7 +58,7 @@ func newTestManager(executor platform.Executor) *Manager {
 }
 
 func TestManagerCreate(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := newTestManager(mockExec)
 
 	cfg := &platform.SSHConfig{
@@ -68,14 +72,15 @@ func TestManagerCreate(t *testing.T) {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	if tunnel.ID != 1 {
-		t.Errorf("tunnel.ID = %d, want 1", tunnel.ID)
+	snapshot := tunnel.Snapshot()
+	if snapshot.ID != 1 {
+		t.Errorf("tunnel.ID = %d, want 1", snapshot.ID)
 	}
-	if tunnel.Name != "test-tunnel" {
-		t.Errorf("tunnel.Name = %q, want %q", tunnel.Name, "test-tunnel")
+	if snapshot.Name != "test-tunnel" {
+		t.Errorf("tunnel.Name = %q, want %q", snapshot.Name, "test-tunnel")
 	}
-	if tunnel.Status != StatusRunning {
-		t.Errorf("tunnel.Status = %v, want %v", tunnel.Status, StatusRunning)
+	if snapshot.Status != StatusRunning {
+		t.Errorf("tunnel.Status = %v, want %v", snapshot.Status, StatusRunning)
 	}
 	if mockExec.GetCallCount() != 1 {
 		t.Errorf("Connect called %d times, want 1", mockExec.GetCallCount())
@@ -83,8 +88,8 @@ func TestManagerCreate(t *testing.T) {
 }
 
 func TestManagerCreateError(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
-	mockExec.ConnectErr = platform.ErrConnectFailed
+	mockExec := testutil.NewMockExecutor()
+	mockExec.ConnectErr = testutil.ErrConnectFailed
 	m := newTestManager(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com"}
@@ -94,19 +99,20 @@ func TestManagerCreateError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	if tunnel.Status != StatusError {
-		t.Errorf("tunnel.Status = %v, want %v", tunnel.Status, StatusError)
+	snapshot := tunnel.Snapshot()
+	if snapshot.Status != StatusError {
+		t.Errorf("tunnel.Status = %v, want %v", snapshot.Status, StatusError)
 	}
-	if tunnel.Error == "" {
+	if snapshot.Error == "" {
 		t.Error("tunnel.Error is empty")
 	}
 }
 
 func TestManagerCreateKeepsAsyncConnectionConnectingUntilReady(t *testing.T) {
-	conn := platform.NewMockConnection()
+	conn := testutil.NewMockConnection()
 	conn.SetRunning(false)
-	mockExec := platform.NewMockExecutor()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return conn, nil
 	}
 	m := newTestManager(mockExec)
@@ -128,27 +134,27 @@ func TestManagerCreateKeepsAsyncConnectionConnectingUntilReady(t *testing.T) {
 }
 
 func TestManagerCreateWithProtocolPassesForwardSpec(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	var captured platform.ForwardSpec
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		captured = spec
-		return platform.NewMockConnection(), nil
+		return testutil.NewMockConnection(), nil
 	}
 	m := newTestManager(mockExec)
 	tun, err := m.CreateWithProtocol("udp", &platform.SSHConfig{Host: "example.com"}, Local, UDP, "127.0.0.1:5353", "127.0.0.1:53")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tun.Forward.Protocol != UDP || captured.Type != platform.Local || captured.Protocol != platform.UDP || captured.LocalAddr != "127.0.0.1:5353" || captured.RemoteAddr != "127.0.0.1:53" {
-		t.Fatalf("captured forward = %#v, tunnel protocol = %s", captured, tun.Forward.Protocol)
+	if tun.ForwardSpec().Protocol != UDP || captured.Type != platform.Local || captured.Protocol != platform.UDP || captured.LocalAddr != "127.0.0.1:5353" || captured.RemoteAddr != "127.0.0.1:53" {
+		t.Fatalf("captured forward = %#v, tunnel protocol = %s", captured, tun.ForwardSpec().Protocol)
 	}
 }
 
 func TestManagerCreateAsyncConnectionFailureBecomesError(t *testing.T) {
-	conn := platform.NewMockConnection()
+	conn := testutil.NewMockConnection()
 	conn.SetRunning(false)
-	mockExec := platform.NewMockExecutor()
-	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*platform.MockConnection, error) {
+	mockExec := testutil.NewMockExecutor()
+	mockExec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
 		return conn, nil
 	}
 	m := newTestManager(mockExec)
@@ -170,7 +176,7 @@ func TestManagerCreateAsyncConnectionFailureBecomesError(t *testing.T) {
 }
 
 func TestManagerList(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := newTestManager(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "host1"}
@@ -186,19 +192,74 @@ func TestManagerList(t *testing.T) {
 }
 
 func TestManagerStop(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := newTestManager(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com"}
 	tunnel, _ := m.Create("test", cfg, Local, "8080", "80")
 
-	err := m.Stop(tunnel.ID)
+	err := m.Stop(tunnel.ID())
 	if err != nil {
 		t.Fatalf("Stop failed: %v", err)
 	}
 
-	if tunnel.Status != StatusStopped {
-		t.Errorf("tunnel.Status = %v, want %v", tunnel.Status, StatusStopped)
+	if tunnel.GetStatus() != StatusStopped {
+		t.Errorf("tunnel.Status = %v, want %v", tunnel.GetStatus(), StatusStopped)
+	}
+}
+
+func TestStopAndRestartCaptureFinalConnectionTotals(t *testing.T) {
+	mockExec := testutil.NewMockExecutor()
+	m := newTestManager(mockExec)
+	tun, err := m.Create("test", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := mockExec.GetLastConnection()
+	first.SetStats(100, 200)
+	if err := m.Restart(tun.ID()); err != nil {
+		t.Fatal(err)
+	}
+	second := mockExec.GetLastConnection()
+	second.SetStats(25, 50)
+	m.Refresh(false, time.Second)
+	snapshot, ok := m.Get(tun.ID())
+	if !ok || snapshot.UploadBytes != 125 || snapshot.DownloadBytes != 250 {
+		t.Fatalf("restart totals = %#v, want 125/250", snapshot)
+	}
+	second.SetStats(40, 80)
+	if err := m.Stop(tun.ID()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = m.Get(tun.ID())
+	if snapshot.UploadBytes != 140 || snapshot.DownloadBytes != 280 {
+		t.Fatalf("stop totals = %d/%d, want 140/280", snapshot.UploadBytes, snapshot.DownloadBytes)
+	}
+}
+
+func TestStopCapturesBytesProducedUntilConnectionCloses(t *testing.T) {
+	conn := testutil.NewMockConnection()
+	conn.SetStats(100, 200)
+	conn.OnStop = func() {
+		conn.SetStats(125, 250)
+	}
+	exec := testutil.NewMockExecutor()
+	exec.ConnectFn = func(*platform.SSHConfig, platform.ForwardSpec) (*testutil.MockConnection, error) {
+		return conn, nil
+	}
+	m := newTestManager(exec)
+	tun, err := m.Create("test", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Refresh(false, time.Second)
+
+	if err := m.Stop(tun.ID()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := m.Get(tun.ID())
+	if snapshot.UploadBytes != 125 || snapshot.DownloadBytes != 250 {
+		t.Fatalf("final totals = %d/%d, want 125/250", snapshot.UploadBytes, snapshot.DownloadBytes)
 	}
 }
 
@@ -212,13 +273,13 @@ func TestManagerStopNotFound(t *testing.T) {
 }
 
 func TestManagerDelete(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := newTestManager(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com"}
 	tunnel, _ := m.Create("test", cfg, Local, "8080", "80")
 
-	err := m.Delete(tunnel.ID)
+	err := m.Delete(tunnel.ID())
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
@@ -229,21 +290,21 @@ func TestManagerDelete(t *testing.T) {
 }
 
 func TestManagerRestart(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := newTestManager(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com"}
 	tunnel, _ := m.Create("test", cfg, Local, "8080", "80")
 
-	m.Stop(tunnel.ID)
+	m.Stop(tunnel.ID())
 
-	err := m.Restart(tunnel.ID)
+	err := m.Restart(tunnel.ID())
 	if err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}
 
-	if tunnel.Status != StatusRunning {
-		t.Errorf("tunnel.Status = %v after restart, want %v", tunnel.Status, StatusRunning)
+	if tunnel.GetStatus() != StatusRunning {
+		t.Errorf("tunnel.Status = %v after restart, want %v", tunnel.GetStatus(), StatusRunning)
 	}
 
 	if mockExec.GetCallCount() != 2 {
@@ -252,34 +313,39 @@ func TestManagerRestart(t *testing.T) {
 }
 
 func TestTunnelUpdateStats(t *testing.T) {
+	conn := testutil.NewMockConnection()
+	conn.SetStats(1000, 2000)
 	tun := &Tunnel{
-		ID:     1,
-		Status: StatusRunning,
+		id:     1,
+		status: StatusRunning,
+		conn:   conn,
 	}
 
-	tun.UpdateStats(1000, 2000, 100, 200, 50*time.Millisecond, true)
+	conn.SetPing(50 * time.Millisecond)
+	tun.refreshStats(true, time.Second)
+	snapshot := tun.Snapshot()
 
-	if tun.UploadBytes != 1000 {
-		t.Errorf("UploadBytes = %d, want 1000", tun.UploadBytes)
+	if snapshot.UploadBytes != 1000 {
+		t.Errorf("UploadBytes = %d, want 1000", snapshot.UploadBytes)
 	}
-	if tun.DownloadBytes != 2000 {
-		t.Errorf("DownloadBytes = %d, want 2000", tun.DownloadBytes)
+	if snapshot.DownloadBytes != 2000 {
+		t.Errorf("DownloadBytes = %d, want 2000", snapshot.DownloadBytes)
 	}
-	if tun.Latency != 50*time.Millisecond {
-		t.Errorf("Latency = %v, want 50ms", tun.Latency)
+	if snapshot.Latency != 50*time.Millisecond {
+		t.Errorf("Latency = %v, want 50ms", snapshot.Latency)
 	}
 }
 
 func TestTunnelCheckStatusDetectsConnectionFailure(t *testing.T) {
-	mockConn := platform.NewMockConnection()
+	mockConn := testutil.NewMockConnection()
 	tun := &Tunnel{
-		ID:     1,
-		Status: StatusRunning,
-		Conn:   mockConn,
+		id:     1,
+		status: StatusRunning,
+		conn:   mockConn,
 	}
 
 	tun.CheckStatus()
-	if tun.Status != StatusRunning {
+	if tun.GetStatus() != StatusRunning {
 		t.Errorf("Status should remain Running when connection is running")
 	}
 
@@ -287,40 +353,40 @@ func TestTunnelCheckStatusDetectsConnectionFailure(t *testing.T) {
 
 	tun.CheckStatus()
 
-	if tun.Status != StatusError {
-		t.Errorf("Status = %v after connection error, want %v", tun.Status, StatusError)
+	if tun.GetStatus() != StatusError {
+		t.Errorf("Status = %v after connection error, want %v", tun.GetStatus(), StatusError)
 	}
-	if tun.Error == "" {
+	if tun.GetError() == "" {
 		t.Error("Error should be set")
 	}
 }
 
 func TestTunnelCheckStatus(t *testing.T) {
-	mockConn := platform.NewMockConnection()
+	mockConn := testutil.NewMockConnection()
 	tun := &Tunnel{
-		ID:     1,
-		Status: StatusRunning,
-		Conn:   mockConn,
+		id:     1,
+		status: StatusRunning,
+		conn:   mockConn,
 	}
 
 	tun.CheckStatus()
-	if tun.Status != StatusRunning {
+	if tun.GetStatus() != StatusRunning {
 		t.Errorf("Status should remain Running when connection is running")
 	}
 
 	mockConn.SetRunning(false)
 	tun.CheckStatus()
 
-	if tun.Status != StatusError {
-		t.Errorf("Status = %v after connection stopped, want %v", tun.Status, StatusError)
+	if tun.GetStatus() != StatusError {
+		t.Errorf("Status = %v after connection stopped, want %v", tun.GetStatus(), StatusError)
 	}
 }
 
 func TestTunnelGetStatusAndError(t *testing.T) {
 	tun := &Tunnel{
-		ID:     1,
-		Status: StatusError,
-		Error:  "test error",
+		id:      1,
+		status:  StatusError,
+		failure: &platform.Failure{Code: platform.FailureUnknown, Detail: "test error"},
 	}
 
 	if diff := cmp.Diff(tun.GetStatus(), StatusError); diff != "" {
@@ -333,7 +399,7 @@ func TestTunnelGetStatusAndError(t *testing.T) {
 }
 
 func TestManagerGetReturnsMatchingTunnel(t *testing.T) {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := newTestManager(mockExec)
 	cfg := &platform.SSHConfig{Host: "example.com"}
 
@@ -346,20 +412,19 @@ func TestManagerGetReturnsMatchingTunnel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := m.Get(second.ID); got != second {
-		t.Fatalf("Get(%d) = %#v, want second tunnel", second.ID, got)
+	if got, ok := m.Get(second.ID()); !ok || got.ID != second.ID() {
+		t.Fatalf("Get(%d) = %#v, want second tunnel", second.ID(), got)
 	}
-	if got := m.Get(first.ID); got != first {
-		t.Fatalf("Get(%d) = %#v, want first tunnel", first.ID, got)
+	if got, ok := m.Get(first.ID()); !ok || got.ID != first.ID() {
+		t.Fatalf("Get(%d) = %#v, want first tunnel", first.ID(), got)
 	}
-	if got := m.Get(999); got != nil {
+	if got, ok := m.Get(999); ok {
 		t.Fatalf("Get missing tunnel = %#v, want nil", got)
 	}
 }
 
 func TestTunnelGetSnapshotReturnsAtomicStats(t *testing.T) {
-	tun := &Tunnel{}
-	tun.UpdateStats(123, 456, 7, 8, 25*time.Millisecond, true)
+	tun := &Tunnel{uploadBytes: 123, downloadBytes: 456}
 
 	got := tun.GetSnapshot()
 	if got.UploadBytes != 123 || got.DownloadBytes != 456 {
@@ -368,7 +433,7 @@ func TestTunnelGetSnapshotReturnsAtomicStats(t *testing.T) {
 }
 
 type testSFTPConnection struct {
-	*platform.MockConnection
+	*testutil.MockConnection
 	client interface{}
 	err    error
 }
@@ -382,9 +447,9 @@ func (c *testSFTPConnection) NewSFTPClient() (interface{}, error) {
 
 func TestManagerGetSFTPClient(t *testing.T) {
 	wantClient := struct{ name string }{name: "sftp"}
-	conn := &testSFTPConnection{MockConnection: platform.NewMockConnection(), client: wantClient}
-	m := newTestManager(platform.NewMockExecutor())
-	m.Tunnels = append(m.Tunnels, &Tunnel{ID: 1, Status: StatusRunning, Conn: conn})
+	conn := &testSFTPConnection{MockConnection: testutil.NewMockConnection(), client: wantClient}
+	m := newTestManager(testutil.NewMockExecutor())
+	m.tunnels = append(m.tunnels, &Tunnel{id: 1, status: StatusRunning, conn: conn})
 
 	got, err := m.GetSFTPClient(1)
 	if err != nil {
@@ -396,11 +461,11 @@ func TestManagerGetSFTPClient(t *testing.T) {
 }
 
 func TestManagerGetSFTPClientRejectsInvalidStates(t *testing.T) {
-	m := newTestManager(platform.NewMockExecutor())
-	m.Tunnels = append(m.Tunnels,
-		&Tunnel{ID: 1, Status: StatusStopped, Conn: &testSFTPConnection{MockConnection: platform.NewMockConnection()}},
-		&Tunnel{ID: 2, Status: StatusRunning, Conn: platform.NewMockConnection()},
-		&Tunnel{ID: 3, Status: StatusRunning, Conn: &testSFTPConnection{MockConnection: platform.NewMockConnection(), err: fmt.Errorf("sftp failed")}},
+	m := newTestManager(testutil.NewMockExecutor())
+	m.tunnels = append(m.tunnels,
+		&Tunnel{id: 1, status: StatusStopped, conn: &testSFTPConnection{MockConnection: testutil.NewMockConnection()}},
+		&Tunnel{id: 2, status: StatusRunning, conn: testutil.NewMockConnection()},
+		&Tunnel{id: 3, status: StatusRunning, conn: &testSFTPConnection{MockConnection: testutil.NewMockConnection(), err: fmt.Errorf("sftp failed")}},
 	)
 
 	tests := []struct {
@@ -425,7 +490,7 @@ func TestManagerGetSFTPClientRejectsInvalidStates(t *testing.T) {
 
 func TestManagerSettersAffectCreate(t *testing.T) {
 	authCtx := &platform.AuthContext{}
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := NewManager(nil)
 	m.SetAuthContext(authCtx)
 	m.SetExecutor(mockExec)
@@ -436,5 +501,144 @@ func TestManagerSettersAffectCreate(t *testing.T) {
 	}
 	if mockExec.GetCallCount() != 1 {
 		t.Fatalf("custom executor call count = %d, want 1", mockExec.GetCallCount())
+	}
+}
+
+func TestDeleteRejectsLateConnectionResult(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	conn := testutil.NewMockConnection()
+	exec := testutil.NewMockExecutor()
+	exec.ConnectContextFn = func(ctx *platform.AuthContext, cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
+		close(started)
+		<-release
+		return conn, nil
+	}
+	m := newTestManager(exec)
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := m.Create("late", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+		createDone <- err
+	}()
+	<-started
+	if err := m.Delete(1); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-createDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("late Create error = %v, want context cancellation", err)
+	}
+	if len(m.List()) != 0 {
+		t.Fatal("deleted tunnel was restored by a late connection")
+	}
+	if conn.IsRunning() {
+		t.Fatal("late connection was not stopped")
+	}
+}
+
+func TestDeletedTunnelCannotBeStartedThroughStaleReference(t *testing.T) {
+	exec := testutil.NewMockExecutor()
+	m := newTestManager(exec)
+	tun, err := m.Create("deleted", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Delete(tun.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.startTunnel(tun); !errors.Is(err, errTunnelDeleted) {
+		t.Fatalf("start deleted tunnel error = %v, want %v", err, errTunnelDeleted)
+	}
+	if got := exec.GetCallCount(); got != 1 {
+		t.Fatalf("Connect called %d times, want only the initial create", got)
+	}
+}
+
+func TestRestartSupersedesBlockedConnectionGeneration(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstConn := testutil.NewMockConnection()
+	secondConn := testutil.NewMockConnection()
+	exec := testutil.NewMockExecutor()
+	var call atomic.Int32
+	exec.ConnectContextFn = func(ctx *platform.AuthContext, cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
+		if call.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return firstConn, nil
+		}
+		return secondConn, nil
+	}
+	m := newTestManager(exec)
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := m.Create("restart", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+		createDone <- err
+	}()
+	<-firstStarted
+	if err := m.Restart(1); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseFirst)
+	if err := <-createDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("superseded Create error = %v", err)
+	}
+	snapshot, ok := m.Get(1)
+	if !ok || snapshot.Status != StatusRunning {
+		t.Fatalf("restart snapshot = %#v", snapshot)
+	}
+	if firstConn.IsRunning() {
+		t.Fatal("superseded connection was not stopped")
+	}
+	if !secondConn.IsRunning() {
+		t.Fatal("current connection was stopped")
+	}
+}
+
+func TestStopCancelsInFlightConnectContextAndAuthRequests(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	cancelledRequests := make(chan int, 2)
+	authCtx := &platform.AuthContext{
+		Cancel: context.Background(),
+		CancelRequests: func(id int) {
+			cancelledRequests <- id
+		},
+	}
+	exec := testutil.NewMockExecutor()
+	exec.ConnectContextFn = func(ctx *platform.AuthContext, cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
+		close(started)
+		<-ctx.Cancel.Done()
+		close(cancelled)
+		return nil, ctx.Cancel.Err()
+	}
+	m := NewManager(authCtx)
+	m.SetExecutor(exec)
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := m.Create("cancel", &platform.SSHConfig{Host: "example.com"}, Local, "8080", "80")
+		createDone <- err
+	}()
+	<-started
+	if err := m.Stop(1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("connect context was not cancelled")
+	}
+	<-createDone
+	select {
+	case id := <-cancelledRequests:
+		if id != 1 {
+			t.Fatalf("cancelled auth request id = %d", id)
+		}
+	default:
+		t.Fatal("auth prompt cancellation was not requested")
 	}
 }

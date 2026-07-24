@@ -73,7 +73,7 @@ Host single-label
 
 	want := []Host{
 		{Name: "simple-host", Hostname: "simple.example.com", User: "simpleuser", Port: "2222"},
-		{Name: "full-host", Hostname: "full.example.com", User: "fulluser", Port: "22", IdentityFile: "~/.ssh/id_ed25519"},
+		{Name: "full-host", Hostname: "full.example.com", User: "fulluser", Port: "22", IdentityFile: "~/.ssh/id_ed25519", IdentityFiles: []string{"~/.ssh/id_ed25519"}},
 		{Name: "minimal-host", Hostname: "minimal-host", User: expectedUser, Port: "22"},
 		{Name: "commented-host", Hostname: "commented.example.com", User: "commenteduser", Port: "22"},
 		{Name: "labeled-host", Hostname: "labeled.example.com", User: "labeluser", Port: "2222", Labels: []string{"VM_debian", "vm22", "vm33"}},
@@ -156,5 +156,72 @@ func TestHostDefaults(t *testing.T) {
 	}
 	if h.User != expectedUser {
 		t.Errorf("User = %q, want %q", h.User, expectedUser)
+	}
+}
+
+func TestParseSSHConfigResolvesIncludesPatternsAndMultipleAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	sshDir := filepath.Join(tmpDir, ".ssh")
+	if err := os.Mkdir(sshDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	includedPath := filepath.Join(sshDir, "included.conf")
+	if err := os.WriteFile(includedPath, []byte(`
+Host included
+    HostName included.example.com
+    User include-user
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	configContent := `
+Include ` + includedPath + `
+
+Host alpha beta
+    #!! GroupLabels production database
+    HostName backend.example.com
+    IdentityFile ~/.ssh/service_ed25519
+    IdentityFile ~/.ssh/service_rsa
+    IdentityAgent ~/.ssh/agent.sock
+    IdentitiesOnly yes
+    ProxyJump jump-host
+
+Host *
+    User default-user
+    Port 2200
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(configContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	hosts, err := ParseSSHConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 3 {
+		t.Fatalf("host count = %d, want 3: %#v", len(hosts), hosts)
+	}
+	byName := make(map[string]Host)
+	for _, host := range hosts {
+		byName[host.Name] = host
+	}
+	included := byName["included"]
+	if included.Hostname != "included.example.com" || included.User != "include-user" || included.Port != "2200" {
+		t.Fatalf("included host = %#v", included)
+	}
+	for _, alias := range []string{"alpha", "beta"} {
+		host := byName[alias]
+		if host.Hostname != "backend.example.com" || host.User != "default-user" || host.Port != "2200" {
+			t.Fatalf("%s resolved host = %#v", alias, host)
+		}
+		if diff := cmp.Diff([]string{"~/.ssh/service_ed25519", "~/.ssh/service_rsa"}, host.IdentityFiles); diff != "" {
+			t.Fatalf("%s identities mismatch (-want +got):\n%s", alias, diff)
+		}
+		if !host.IdentitiesOnly || host.IdentityAgent != "~/.ssh/agent.sock" || host.ProxyJump != "jump-host" {
+			t.Fatalf("%s SSH options = %#v", alias, host)
+		}
+		if diff := cmp.Diff([]string{"production", "database"}, host.Labels); diff != "" {
+			t.Fatalf("%s labels mismatch (-want +got):\n%s", alias, diff)
+		}
 	}
 }

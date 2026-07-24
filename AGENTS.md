@@ -2,8 +2,8 @@
 
 ## Project Identity
 - **Purpose**: Interactive SSH Tunnel manager with TUI interface, cross-platform, pure Go implementation
-- **Language**: Go 1.21+
-- **UI Framework**: bubbletea (Charm TUI framework) + lipgloss for styling
+- **Language**: Go 1.25+
+- **UI Framework**: Bubble Tea v2 + Bubbles v2 + Lip Gloss v2
 - **SSH Implementation**: golang.org/x/crypto/ssh (no external ssh/ssh.exe dependencies)
 
 ## Architecture
@@ -14,25 +14,34 @@ cmd/intun/
 
 internal/
   ├── config/
-  │   └── config.go            # ~/.ssh/config parser, returns []Host; supports #!! GroupLabels
+  │   └── config.go            # OpenSSH config resolver: Include, wildcard defaults, identities, ProxyJump, GroupLabels
   ├── platform/
   │   ├── platform.go          # Core interfaces and ForwardSpec direction/protocol model
-  │   ├── platform_ssh.go      # SSHExecutor.connect() - SSH handshake, tunnel creation, keepalive, NewSFTPClient
+  │   ├── platform_ssh.go      # SSHExecutor connection and ProxyJump orchestration
+  │   ├── ssh_connection.go    # Thread-safe SSH runtime, health checks, stats, forwards, and SFTP access
   │   ├── forward_dispatch.go  # Forwarder selection for TCP and UDP implementations
   │   ├── forward.go           # Local/Remote/Dynamic TCP forwarding
+  │   ├── socks5.go            # Stream-exact SOCKS5 parser with IPv4/domain/IPv6 support
+  │   ├── auth.go              # Agent, private key/passphrase, password, and keyboard-interactive auth
+  │   ├── agent_socket_*.go    # Unix socket / Windows named-pipe SSH agent adapters
   │   ├── udp_forward.go       # Local/Remote UDP composition and remote relay startup handshake
   │   ├── udp_forward_runtime.go # Shared UDP relay process lifecycle and failure propagation
   │   ├── udp_frame_transport.go # UDP payload accounting over the framed transport
   │   ├── bounded_buffer.go    # Bounded relay diagnostics captured from remote sessions
-  │   ├── mock.go              # MockConnection + MockExecutor for testing
   │   ├── known_hosts.go       # Host key verification, VerifyHostKey() with host:port format
   │   └── counted_conn.go      # Traffic counting wrapper for net.Conn
+  ├── testutil/
+  │   └── platform.go          # MockConnection + MockExecutor shared only by tests
   ├── tunnel/
-  │   └── tunnel.go            # Manager CRUD, Tunnel struct with stats, thread-safe setStatus, GetSFTPClient
+  │   ├── tunnel.go            # Domain model and immutable snapshots
+  │   ├── manager.go           # CRUD, executor orchestration, and SFTP access
+  │   └── runtime.go           # Generation-safe lifecycle and cumulative runtime statistics
   ├── monitor/
   │   └── monitor.go           # Stats polling, ping every 5 ticks (1s interval), synchronous updates
   ├── sftp/
-  │   └── client.go            # Context-aware SFTP wrapper: read, sync, preview, rename, remote path helpers
+  │   ├── client.go            # Context-aware serialized SFTP operation lifecycle
+  │   ├── atomic_transfer.go   # Temporary-file writes and atomic local/remote replacement
+  │   └── sync_plan.go         # One-pass immutable recursive synchronization plan
   ├── udprelay/
   │   ├── protocol.go          # Versioned, length-delimited UDP frame codec
   │   ├── transport.go         # Concurrent-safe framed stream transport abstraction
@@ -42,10 +51,18 @@ internal/
   │   ├── server.go            # Relay options and stream-oriented target entry point
   │   └── command.go           # Hidden intun relay command used over SSH
   └── tui/
-      ├── tui.go               # Bubbletea model, auth prompt queue, main screens, shared styles
+      ├── tui.go / state.go    # Root model composed from domain-specific state groups
+      ├── components.go        # Bubbles v2 text input, spinner, viewport, and help components
+      ├── host_select.go       # Searchable SSH hosts and manual destination input
       ├── modal.go             # Reusable full-screen modal overlay
       ├── tunnel_create_confirm.go # Remote UDP exposure confirmation
-      ├── sftp_actions.go      # SFTP key handling, context/cancel, transfer orchestration
+      ├── sftp_actions.go      # SFTP key handling and interaction state
+      ├── sftp_commands.go     # SFTP session and navigation Tea commands
+      ├── sftp_file_commands.go # Preview, rename, and refresh Tea commands
+      ├── sftp_sync_commands.go # Preflight, planning, and transfer-result orchestration
+      ├── host_view.go         # Host selector and manual destination rendering
+      ├── tunnel_form_view.go  # Tunnel type and address form rendering
+      ├── overlay_view.go      # Authentication, confirmation, and status overlays
       └── sftp_render.go       # SFTP dual-panel rendering, progress, preview
 ```
 
@@ -74,14 +91,15 @@ internal/
 
 ### Thread Safety
 - **SSHConnection**: mu protects client, forwards, exited, lastError; addForward() rejects and closes late forwards after Stop
-- **Tunnel**: mu protects Status, Error, stats; use setStatus() setter (never write directly); GetSnapshot() for atomic reads
-- **Manager**: mu protects Tunnels list; Restart() releases mu during sleep to avoid blocking
+- **Tunnel**: private mutable runtime state; external consumers receive immutable `Snapshot` values
+- **Manager**: generation IDs and per-run contexts reject late Connect results after Stop/Delete/Restart; Delete is terminal even for stale references
 - **Monitor**: synchronous updateTunnelStats() (no goroutine per tunnel)
 - **KnownHosts**: RWMutex on callback access
 - **Auth requests**: channel-based with queue in TUI
 - **SFTP Client**: mu serializes operations and Close(); every file operation accepts a context
 - **SFTP ProgressInfo**: RWMutex protects transfer progress; TUI reads via Snapshot()
-- **SFTP transfers**: started with cancelable context; stale done messages are ignored; exiting SFTP cancels transfer and synchronously closes the client
+- **SFTP commands**: all TUI disk/network I/O runs in Tea commands; operation and transfer IDs discard stale results
+- **SFTP exit**: cancellation is immediate and client close runs asynchronously
 
 ### Statistics
 - Interval: 1 second (monitor tick)
@@ -90,13 +108,15 @@ internal/
 - Format units: KB, MB only (no B)
 
 ### Authentication
-- Auto-loads: ~/.ssh/id_rsa, ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa
-- Supports SSH config IdentityFile
+- Supports multiple `IdentityFile` entries, encrypted keys, `IdentityAgent`, and `IdentitiesOnly`
+- SSH agent uses Unix sockets or Windows OpenSSH named pipes
+- Supports `Include`, wildcard defaults, and comma-separated ProxyJump chains
 - Host key verification with interactive prompt
 - Password and keyboard-interactive auth support with TUI prompts
 
 ### UI Layout
-- Column widths defined as constants (colIDW, colStatusW, colTypeW, colAddrW, colLatencyW)
+- Long tunnel lists use a Bubbles viewport and remain selection-aware
+- SFTP uses dual panels on wide terminals and the focused panel on compact terminals
 - Selected row: white text, badge rendered separately (no ANSI nesting)
 - Status badges: background colors (Running=green, Stopped=gray, Error=red, Connecting=yellow)
 - Speed line: left-aligned, 4-space indent, matches IP column above
@@ -106,7 +126,7 @@ internal/
 
 ### SOCKS5 (Dynamic forward)
 - Supports no-auth only (method 0x00)
-- Address types: IPv4 (0x01) and domain (0x03)
+- Address types: IPv4 (0x01), domain (0x03), and IPv6 (0x04)
 - Proper SOCKS5 error replies for unsupported commands/address types
 
 ### UDP over SSH
@@ -128,14 +148,16 @@ internal/
 - Navigation: arrows and PgUp/PgDn scroll long lists; Enter opens directory or parent
 - Operations: Sync selected file (`s`), recursive directory sync (`r` with confirm modal), rename (`n`), preview (`v`)
 - Sync direction follows the active panel: Local uploads to Remote, Remote downloads to Local
+- Recursive sync executes the immutable preflight plan, skips links/non-regular or unreadable entries, and only overwrites the exact paths the user approved
+- File commits use temporary files and no-replace installation; newly appeared destinations are never overwritten without a fresh confirmation
 - Rename accepts basename-only names and rejects path separators, `.` and `..`
 - Preview reads the first 4KB of a file
 - Transfer progress is shown in a drawer; transfer results stay in a shared modal until the user confirms with Enter/Esc
-- Exiting SFTP with `q`/Esc cancels active transfer and synchronously closes the SFTP client
+- Exiting SFTP with `q`/Esc cancels active work, invalidates pending results, and closes the client asynchronously
 
 ### Cross-platform
 - Username lookup: os/user.Current() with USER/LOGNAME fallback
-- Port input for Remote tunnels: accepts ip:port or plain port (auto-prefixes 127.0.0.1)
+- Forward input accepts plain ports, hostnames, IPv4, and bracketed IPv6
 - Window resize: 500ms polling via golang.org/x/term.GetSize()
 
 ## Build Commands
@@ -146,8 +168,9 @@ internal/
 
 ## Testing
 - Tests cover config, monitor, sftp, tui, and tunnel packages
-- Mock infrastructure in platform/mock.go
-- `make test` / `make vet`
+- Mock infrastructure is isolated in internal/testutil and is not linked into the application
+- `make check` runs formatting, vet, Staticcheck, race tests, a 75% total coverage gate, govulncheck, and Gitleaks scans of both Git history and the current worktree
+- CI also runs protocol fuzz smoke tests and five cross-platform builds
 
 ## Testing Checklist
 - [ ] Host key prompt shows correct hostname (not empty)
@@ -168,14 +191,14 @@ internal/
 - [ ] Release scan has no credentials, private keys, tokens, local filesystem paths, usernames, machine names, or private host/domain names
 
 ## Known Limitations
-- SOCKS5 dynamic proxy: no-auth only, no IPv6 address type
+- SOCKS5 dynamic proxy: no-auth only
 - Single auth request at a time (queue-based)
 - Host key format in known_hosts must be "host:port" for proper matching
 - Remote TCP listen requires `GatewayPorts yes` on the server for non-loopback addresses; Remote UDP has separate process-owned listener semantics described above
 - One tunnel owns one protocol; offering TCP and UDP on the same numeric port requires two tunnels
 - SFTP preview is intentionally capped at the first 4KB
-- SFTP exit may block briefly while cancel/close completes
 
 ## Debugging
 - Set `INTUN_LOG` env var to a file path for SSH connection diagnostics
+- Logs use mode 0600, rotate at 5 MiB, retain one backup, and rate-limit repeated UDP failures
 - Without INTUN_LOG, all log output is discarded

@@ -59,7 +59,7 @@ func (m Model) handlePromptKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		if current.Type == platform.AuthRequestPassword {
+		if current.Type != platform.AuthRequestHostKey {
 			key := msg.Key()
 			if key.Code == tea.KeySpace {
 				m.promptInput += " "

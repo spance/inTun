@@ -9,17 +9,22 @@ import (
 )
 
 const pingIntervalMultiplier = 5
+const defaultMonitorInterval = time.Second
 
 type Monitor struct {
-	manager  *tunnel.Manager
-	interval time.Duration
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	tick     int
+	manager   *tunnel.Manager
+	interval  time.Duration
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	startOnce sync.Once
+	tick      int
 }
 
 func NewMonitor(manager *tunnel.Manager, interval time.Duration) *Monitor {
+	if interval <= 0 {
+		interval = defaultMonitorInterval
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Monitor{
 		manager:  manager,
@@ -30,8 +35,10 @@ func NewMonitor(manager *tunnel.Manager, interval time.Duration) *Monitor {
 }
 
 func (m *Monitor) Start() {
-	m.wg.Add(1)
-	go m.run()
+	m.startOnce.Do(func() {
+		m.wg.Add(1)
+		go m.run()
+	})
 }
 
 func (m *Monitor) Stop() {
@@ -58,33 +65,5 @@ func (m *Monitor) run() {
 
 func (m *Monitor) updateAllStats() {
 	shouldPing := m.tick%pingIntervalMultiplier == 0
-
-	for _, t := range m.manager.List() {
-		t.CheckStatus()
-		if t.GetStatus() != tunnel.StatusRunning {
-			continue
-		}
-		m.updateTunnelStats(t, shouldPing)
-	}
-}
-
-func (m *Monitor) updateTunnelStats(t *tunnel.Tunnel, shouldPing bool) {
-	var latency time.Duration
-	var up, down, speedUp, speedDown int64
-
-	if conn := t.GetConnection(); conn != nil {
-		if shouldPing {
-			latency = conn.Ping()
-		}
-		up, down = conn.GetStats()
-
-		prev := t.GetSnapshot()
-		deltaUp := up - prev.UploadBytes
-		deltaDown := down - prev.DownloadBytes
-
-		speedUp = int64(float64(deltaUp) * float64(time.Second) / float64(m.interval))
-		speedDown = int64(float64(deltaDown) * float64(time.Second) / float64(m.interval))
-	}
-
-	t.UpdateStats(up, down, speedUp, speedDown, latency, shouldPing)
+	m.manager.Refresh(shouldPing, m.interval)
 }

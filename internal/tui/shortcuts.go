@@ -1,8 +1,7 @@
 package tui
 
 import (
-	"strings"
-
+	"charm.land/bubbles/v2/key"
 	"charm.land/lipgloss/v2"
 	"github.com/spance/intun/internal/tunnel"
 )
@@ -19,7 +18,20 @@ func (m Model) renderShortcuts() string {
 	switch m.screen {
 	case ScreenMain:
 		items = m.mainShortcutCommands()
-	case ScreenSelectHost, ScreenSelectType:
+	case ScreenSelectHost:
+		items = []shortcutCommand{
+			{"↑↓", "Navigate"},
+			{"Enter", "Select"},
+			{"/", "Filter"},
+			{"m", "Manual"},
+			{"Esc", "Back"},
+		}
+	case ScreenInputHost:
+		items = []shortcutCommand{
+			{"Enter", "Continue"},
+			{"Esc", "Back"},
+		}
+	case ScreenSelectType:
 		items = []shortcutCommand{
 			{"↑↓", "Navigate"},
 			{"Enter", "Select"},
@@ -57,23 +69,20 @@ func (m Model) renderShortcuts() string {
 		}
 	}
 
-	segments := make([]string, 0, len(items))
+	bindings := make([]key.Binding, 0, len(items))
 	for _, item := range items {
-		segments = append(segments, commandSegment(item.key, item.label))
+		bindings = append(bindings, key.NewBinding(
+			key.WithKeys(item.key),
+			key.WithHelp(item.key, item.label),
+		))
 	}
-	separator := lipgloss.NewStyle().Foreground(colorMuted).Render(" · ")
-	body := strings.Join(segments, separator)
+	helpModel := m.help
+	helpModel.SetWidth(max(1, width-2))
+	body := helpModel.ShortHelpView(bindings)
 	if lipgloss.Width(body) > width {
 		body = truncateANSI(body, width)
 	}
 	return commandBarStyle.Width(width).Render(lipgloss.PlaceHorizontal(width-2, lipgloss.Center, body))
-}
-
-func commandSegment(key, label string) string {
-	return lipgloss.JoinHorizontal(lipgloss.Center,
-		commandKeyStyle.Render(key),
-		commandTextStyle.Render(label),
-	)
 }
 
 func (m Model) mainShortcutCommands() []shortcutCommand {
@@ -86,7 +95,7 @@ func (m Model) mainShortcutCommands() []shortcutCommand {
 		)
 	}
 
-	switch tunnels[m.selectedIndex].GetStatus() {
+	switch tunnels[m.selectedIndex].Status {
 	case tunnel.StatusRunning:
 		items = append(items,
 			shortcutCommand{"f", "SFTP"},
@@ -107,6 +116,7 @@ func (m Model) mainShortcutCommands() []shortcutCommand {
 	case tunnel.StatusConnecting:
 		items = append(items,
 			shortcutCommand{"●", "Connecting"},
+			shortcutCommand{"s", "Stop"},
 			shortcutCommand{"d", "Delete"},
 		)
 	default:

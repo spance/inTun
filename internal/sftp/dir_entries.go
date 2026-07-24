@@ -6,23 +6,16 @@ import (
 	"time"
 )
 
-const maxDirEntries = 1000
-
 func (s *Client) ReadRemoteDir(ctx context.Context, path string) ([]FileEntry, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := checkCanceled(ctx); err != nil {
+	_, done, err := s.beginOperation(ctx)
+	if err != nil {
 		return nil, err
 	}
+	defer done()
 
 	infos, err := s.client.ReadDirContext(ctx, path)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(infos) > maxDirEntries {
-		infos = infos[:maxDirEntries]
 	}
 
 	entries := make([]FileEntry, 0, len(infos))
@@ -43,10 +36,6 @@ func ReadLocalDir(path string) ([]FileEntry, error) {
 	infos, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(infos) > maxDirEntries {
-		infos = infos[:maxDirEntries]
 	}
 
 	entries := make([]FileEntry, 0, len(infos))
@@ -83,12 +72,11 @@ func LocalPathInfo(path string) (FileEntry, bool, error) {
 }
 
 func (s *Client) RemotePathInfo(ctx context.Context, path string) (FileEntry, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := checkCanceled(ctx); err != nil {
+	_, done, err := s.beginOperation(ctx)
+	if err != nil {
 		return FileEntry{}, false, err
 	}
+	defer done()
 	info, err := s.client.Lstat(path)
 	if os.IsNotExist(err) {
 		return FileEntry{}, false, nil

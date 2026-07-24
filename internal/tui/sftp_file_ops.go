@@ -25,35 +25,9 @@ func (m Model) sftpPreviewFile() (tea.Model, tea.Cmd) {
 	}
 
 	if m.sftpFocus == 0 {
-		localPath := filepath.Join(m.sftpLocalDir, entry.Name)
-		if err := m.sftpContext().Err(); err != nil {
-			m.sftpPreview = fmt.Sprintf("Error: %v", err)
-			m.sftpPreviewing = true
-			return m, nil
-		}
-		data, err := readPreviewBytes(localPath, 4096)
-		if err != nil {
-			m.sftpPreview = fmt.Sprintf("Error: %v", err)
-			m.sftpPreviewing = true
-			return m, nil
-		}
-		content := string(data)
-		if isBinaryContent(content) {
-			content = "[binary file]"
-		}
-		m.sftpPreview = content
-	} else {
-		remotePath := sftp.JoinRemotePath(m.sftpRemoteDir, entry.Name)
-		content, err := m.sftpClient.Preview(m.sftpContext(), remotePath)
-		if err != nil {
-			m.sftpPreview = fmt.Sprintf("Error: %v", err)
-			m.sftpPreviewing = true
-			return m, nil
-		}
-		m.sftpPreview = content
+		return m.previewSFTPFile(0, filepath.Join(m.sftpLocalDir, entry.Name))
 	}
-	m.sftpPreviewing = true
-	return m, nil
+	return m.previewSFTPFile(1, sftp.JoinRemotePath(m.sftpRemoteDir, entry.Name))
 }
 
 func (m Model) sftpConfirmRename() (tea.Model, tea.Cmd) {
@@ -81,54 +55,11 @@ func (m Model) sftpConfirmRename() (tea.Model, tea.Cmd) {
 	if m.sftpFocus == 0 {
 		oldPath := filepath.Join(m.sftpLocalDir, oldName)
 		newPath := filepath.Join(m.sftpLocalDir, newName)
-		if err := m.sftpContext().Err(); err != nil {
-			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
-			return m, nil
-		}
-		if err := os.Rename(oldPath, newPath); err != nil {
-			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
-			return m, nil
-		}
-	} else {
-		oldPath := sftp.JoinRemotePath(m.sftpRemoteDir, oldName)
-		newPath := sftp.JoinRemotePath(m.sftpRemoteDir, newName)
-		if err := m.sftpClient.Rename(m.sftpContext(), oldPath, newPath); err != nil {
-			m.setStatusMsg(fmt.Sprintf("Rename failed: %v", err))
-			return m, nil
-		}
+		return m.renameSFTPEntry(0, oldPath, newPath)
 	}
-
-	var err error
-	m, err = m.refreshSFTPFiles()
-	if err != nil {
-		m.setStatusMsg(fmt.Sprintf("Refresh failed: %v", err))
-	}
-	return m, nil
-}
-
-func (m Model) refreshSFTPFiles() (Model, error) {
-	var refreshErr error
-	localFiles, err := sftp.ReadLocalDir(m.sftpLocalDir)
-	if err == nil {
-		m.sftpLocalFiles = localFiles
-	} else {
-		refreshErr = fmt.Errorf("local: %w", err)
-	}
-	if m.sftpClient == nil {
-		if refreshErr == nil {
-			refreshErr = fmt.Errorf("remote: SFTP client is not connected")
-		}
-		return m.normalizeSFTPScroll(), refreshErr
-	}
-	remoteFiles, err := m.sftpClient.ReadRemoteDir(m.sftpContext(), m.sftpRemoteDir)
-	if err == nil {
-		m.sftpRemoteFiles = remoteFiles
-	} else if refreshErr == nil {
-		refreshErr = fmt.Errorf("remote: %w", err)
-	} else {
-		refreshErr = fmt.Errorf("%v; remote: %w", refreshErr, err)
-	}
-	return m.normalizeSFTPScroll(), refreshErr
+	oldPath := sftp.JoinRemotePath(m.sftpRemoteDir, oldName)
+	newPath := sftp.JoinRemotePath(m.sftpRemoteDir, newName)
+	return m.renameSFTPEntry(1, oldPath, newPath)
 }
 
 func readPreviewBytes(path string, limit int64) ([]byte, error) {

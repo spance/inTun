@@ -18,12 +18,13 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sftpRenaming = false
 			m.sftpRenameInput = ""
 		case "backspace":
-			if len(m.sftpRenameInput) > 0 {
-				m.sftpRenameInput = m.sftpRenameInput[:len(m.sftpRenameInput)-1]
+			runes := []rune(m.sftpRenameInput)
+			if len(runes) > 0 {
+				m.sftpRenameInput = string(runes[:len(runes)-1])
 			}
 		default:
-			if len(msg.String()) == 1 && msg.String()[0] >= 32 {
-				m.sftpRenameInput += msg.String()
+			if text := msg.Key().Text; text != "" {
+				m.sftpRenameInput += text
 			}
 		}
 		return m, nil
@@ -33,6 +34,7 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case matchKey(msg, keys.Confirm):
 			pending := m.sftpPendingSync
+			pending.allowOverwrite = true
 			m.sftpOverwriteConfirm = false
 			m.sftpOverwriteConfirmMsg = ""
 			m.sftpPendingSync = sftpPendingSync{}
@@ -54,6 +56,7 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case matchKey(msg, keys.Cancel):
 			m.sftpSyncConfirm = false
 			m.sftpSyncConfirmMsg = ""
+			m.sftpPendingDirPlan = nil
 		}
 		return m, nil
 	}
@@ -67,23 +70,40 @@ func (m Model) handleSFTPKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.sftpLoading && !matchKey(msg, keys.Close) {
+		m.setStatusMsg(m.sftpLoadingLabel + "...")
+		return m, nil
+	}
+
 	switch {
 	case matchKey(msg, keys.Close):
+		if m.sftpOperationCancel != nil {
+			m.sftpOperationCancel()
+			m.sftpOperationCancel = nil
+		}
+		m.sftpOperationID++
 		if m.sftpCancel != nil {
 			m.sftpCancel()
 			m.sftpCancel = nil
 		}
-		if m.sftpClient != nil {
-			m.sftpClient.Close()
-			m.sftpClient = nil
-		}
+		m.sftpTransferID++
+		client := m.sftpClient
+		m.sftpClient = nil
 		m.sftpTransferring = false
-		m.sftpDone = nil
+		m.sftpLoading = false
+		m.sftpLoadingLabel = ""
 		m.sftpOverwriteConfirm = false
 		m.sftpOverwriteConfirmMsg = ""
 		m.sftpPendingSync = sftpPendingSync{}
+		m.sftpPendingDirPlan = nil
 		m.screen = ScreenMain
-		return m, nil
+		if client == nil {
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			_ = client.Close()
+			return nil
+		}
 	case matchKey(msg, keys.Switch):
 		if m.sftpFocus == 0 {
 			m.sftpFocus = 1
@@ -180,28 +200,5 @@ func (m Model) sftpEnterDir() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) sftpNavigateTo(path string) (tea.Model, tea.Cmd) {
-	if m.sftpFocus == 0 {
-		if err := m.sftpContext().Err(); err != nil {
-			m.setStatusMsg("Operation cancelled")
-			return m, nil
-		}
-		localFiles, err := sftp.ReadLocalDir(path)
-		if err != nil {
-			m.setStatusMsg("Cannot open directory")
-			return m, nil
-		}
-		m.sftpLocalDir = path
-		m.sftpLocalFiles = localFiles
-	} else {
-		remoteFiles, err := m.sftpClient.ReadRemoteDir(m.sftpContext(), path)
-		if err != nil {
-			m.setStatusMsg("Cannot open directory")
-			return m, nil
-		}
-		m.sftpRemoteDir = path
-		m.sftpRemoteFiles = remoteFiles
-	}
-	m.sftpCursor[m.sftpFocus] = 0
-	m.sftpScroll[m.sftpFocus] = 0
-	return m.normalizeSFTPScroll(), nil
+	return m.navigateSFTP(m.sftpFocus, path)
 }

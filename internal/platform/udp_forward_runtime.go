@@ -10,8 +10,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+type udpRemoteSession interface {
+	Wait() error
+	Close() error
+}
+
 type udpForwardRuntime struct {
-	session    *ssh.Session
+	session    udpRemoteSession
 	serve      func(context.Context) error
 	listener   *net.UDPConn
 	remoteAddr string
@@ -24,6 +29,10 @@ type udpForwardRuntime struct {
 }
 
 func newUDPForwardRuntime(session *ssh.Session, listener *net.UDPConn, remoteAddr string, serve func(context.Context) error, onFailure func(error)) *udpForwardRuntime {
+	return newUDPForwardRuntimeWithSession(session, listener, remoteAddr, serve, onFailure)
+}
+
+func newUDPForwardRuntimeWithSession(session udpRemoteSession, listener *net.UDPConn, remoteAddr string, serve func(context.Context) error, onFailure func(error)) *udpForwardRuntime {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &udpForwardRuntime{
 		session:    session,
@@ -38,20 +47,18 @@ func newUDPForwardRuntime(session *ssh.Session, listener *net.UDPConn, remoteAdd
 
 func (r *udpForwardRuntime) start() {
 	go func() {
-		serveErr := r.serve(r.ctx)
-		waitErr := r.session.Wait()
-		if r.closed.Load() {
-			return
+		results := make(chan error, 2)
+		go func() { results <- r.serve(r.ctx) }()
+		go func() { results <- r.session.Wait() }()
+
+		first := <-results
+		if !r.closed.Load() {
+			if first == nil {
+				first = fmt.Errorf("UDP relay runtime exited")
+			}
+			r.fail(first)
 		}
-		if serveErr != nil {
-			r.fail(serveErr)
-			return
-		}
-		if waitErr != nil {
-			r.fail(waitErr)
-			return
-		}
-		r.fail(fmt.Errorf("remote UDP relay exited"))
+		<-results
 	}()
 }
 
@@ -75,7 +82,9 @@ func (r *udpForwardRuntime) Close() error {
 		if r.listener != nil {
 			_ = r.listener.Close()
 		}
-		result = r.session.Close()
+		if r.session != nil {
+			result = r.session.Close()
+		}
 	})
 	return result
 }

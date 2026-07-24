@@ -121,11 +121,11 @@ func TestReadLocalDirRename(t *testing.T) {
 	}
 }
 
-func TestIsBinary(t *testing.T) {
-	if isBinary("hello world") {
+func TestIsBinaryBytes(t *testing.T) {
+	if isBinaryBytes([]byte("hello world")) {
 		t.Error("plain text should not be binary")
 	}
-	if !isBinary("hello\x00world") {
+	if !isBinaryBytes([]byte("hello\x00world")) {
 		t.Error("string with null byte should be binary")
 	}
 }
@@ -376,7 +376,7 @@ func TestLocalDirectoryTargetConflictDetectsNonDirectories(t *testing.T) {
 	}
 
 	var report OverwriteReport
-	addLocalDirectoryTargetConflict(fileTarget, &report)
+	inspectLocalDirectoryTarget(fileTarget, &report)
 	if report.Count != 1 || len(report.Items) != 1 || report.Items[0].Kind != "file" {
 		t.Fatalf("file target conflict report = %#v, want one file conflict", report)
 	}
@@ -386,7 +386,7 @@ func TestLocalDirectoryTargetConflictDetectsNonDirectories(t *testing.T) {
 	if err := os.Mkdir(dirTarget, 0755); err != nil {
 		t.Fatal(err)
 	}
-	addLocalDirectoryTargetConflict(dirTarget, &report)
+	inspectLocalDirectoryTarget(dirTarget, &report)
 	if report.HasOverwrites() {
 		t.Fatalf("directory target should be allowed, got %#v", report)
 	}
@@ -396,46 +396,9 @@ func TestLocalDirectoryTargetConflictDetectsNonDirectories(t *testing.T) {
 	if err := os.Symlink(dirTarget, linkTarget); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	addLocalDirectoryTargetConflict(linkTarget, &report)
+	inspectLocalDirectoryTarget(linkTarget, &report)
 	if report.Count != 1 || report.Items[0].Kind != "symbolic link" {
 		t.Fatalf("symlink target conflict report = %#v, want symbolic link conflict", report)
-	}
-}
-
-func TestAllowLocalDirectoryTargetSkipsNonDirectories(t *testing.T) {
-	tmpDir := t.TempDir()
-	fileTarget := filepath.Join(tmpDir, "target")
-	if err := os.WriteFile(fileTarget, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var report TransferReport
-	if allowLocalDirectoryTarget(fileTarget, &report) {
-		t.Fatal("file target should not be accepted as a directory sync destination")
-	}
-	if report.SkippedCount != 1 || !strings.Contains(report.Skipped[0].Reason, "target exists as file") {
-		t.Fatalf("skip report = %#v, want target exists as file", report)
-	}
-
-	report = TransferReport{}
-	dirTarget := filepath.Join(tmpDir, "dir")
-	if err := os.Mkdir(dirTarget, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if !allowLocalDirectoryTarget(dirTarget, &report) {
-		t.Fatal("existing directory target should be accepted")
-	}
-	if report.HasSkipped() {
-		t.Fatalf("directory target should not report skipped entries: %#v", report)
-	}
-
-	report = TransferReport{}
-	missingTarget := filepath.Join(tmpDir, "missing")
-	if !allowLocalDirectoryTarget(missingTarget, &report) {
-		t.Fatal("missing target should be accepted")
-	}
-	if report.HasSkipped() {
-		t.Fatalf("missing target should not report skipped entries: %#v", report)
 	}
 }
 
@@ -477,13 +440,11 @@ func TestClientMethodsRespectCanceledContextBeforeRemoteIO(t *testing.T) {
 	if _, _, err := client.remoteExistingKind(ctx, "/remote/file"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("remoteExistingKind error = %v, want context.Canceled", err)
 	}
-	if _, err := client.remoteRegularFileTotal(ctx, "/remote/dir", nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("remoteRegularFileTotal error = %v, want context.Canceled", err)
+	if _, err := client.PlanUploadDir(ctx, t.TempDir(), "/remote/dir"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PlanUploadDir error = %v, want context.Canceled", err)
 	}
-	var report TransferReport
-	var done int64
-	if err := client.downloadRemoteEntry(ctx, "/remote/dir", "/remote/dir/file", t.TempDir(), nil, &report, &done, 0, nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("downloadRemoteEntry error = %v, want context.Canceled", err)
+	if _, err := client.PlanDownloadDir(ctx, "/remote/dir", t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PlanDownloadDir error = %v, want context.Canceled", err)
 	}
 }
 
@@ -570,11 +531,11 @@ func TestWalkLocalTreeSkipsDirectoryWhenEntryRequestsSkipDir(t *testing.T) {
 	}
 }
 
-func TestIgnoreLocalWalkErrorSkipsDirectoriesOnly(t *testing.T) {
-	if err := ignoreLocalWalkError("/dir", modeInfo{mode: os.ModeDir, dir: true}, os.ErrPermission); err != filepath.SkipDir {
+func TestSkipLocalDirOnErrorSkipsDirectoriesOnly(t *testing.T) {
+	if err := skipLocalDirOnError(modeInfo{mode: os.ModeDir, dir: true}); err != filepath.SkipDir {
 		t.Fatalf("directory error = %v, want SkipDir", err)
 	}
-	if err := ignoreLocalWalkError("/file", modeInfo{mode: 0644}, os.ErrPermission); err != nil {
+	if err := skipLocalDirOnError(modeInfo{mode: 0644}); err != nil {
 		t.Fatalf("file error = %v, want nil", err)
 	}
 }

@@ -2,21 +2,27 @@ module github.com/spance/intun
 
 go 1.25.0
 
+toolchain go1.25.12
+
 require (
-	charm.land/bubbletea/v2 v2.0.6
-	charm.land/lipgloss/v2 v2.0.3
-	github.com/charmbracelet/bubbles v1.0.0
+	charm.land/bubbles/v2 v2.1.1
+	charm.land/bubbletea/v2 v2.0.8
+	charm.land/lipgloss/v2 v2.0.5
+	github.com/Microsoft/go-winio v0.6.2
+	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/google/go-cmp v0.7.0
-	github.com/pkg/sftp v1.13.10
-	golang.org/x/crypto v0.51.0
-	golang.org/x/sync v0.21.0
-	golang.org/x/term v0.43.0
+	github.com/kevinburke/ssh_config v1.6.0
+	github.com/pkg/sftp v1.13.11
+	golang.org/x/crypto v0.54.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (
+	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
-	github.com/charmbracelet/ultraviolet v0.0.0-20260416155717-489999b90468 // indirect
-	github.com/charmbracelet/x/ansi v0.11.7 // indirect
+	github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
@@ -24,9 +30,8 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
-	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sys v0.44.0 // indirect
 )

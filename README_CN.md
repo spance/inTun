@@ -4,7 +4,7 @@
 
 Interactive SSH Tunnel - 跨平台 SSH 隧道管理器，基于纯 Go 实现，提供现代化 TUI 界面。
 
-[![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/go-1.25%2B-blue)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ## 界面预览
@@ -16,13 +16,13 @@ Interactive SSH Tunnel - 跨平台 SSH 隧道管理器，基于纯 Go 实现，�
 - **TCP 与 UDP 转发**：本地与远程 TCP/UDP 转发，以及动态 SOCKS5 TCP 代理 (-D)
 - **纯 Go SSH 实现**：不依赖系统 ssh/plink，完全跨平台
 - **实时监控**：上下行流量统计 (TX/RX)、传输速率、网络延迟
-- **自动配置**：解析 `~/.ssh/config` 自动发现主机
-- **标签分组**：解析 `#!! GroupLabels` 注释，支持主机标签和过滤
+- **完整 OpenSSH 配置**：支持别名、通配符、`Include`、多个密钥、`IdentityAgent`、`IdentitiesOnly` 和 `ProxyJump`
+- **主机发现**：可按别名、地址、用户和 `#!! GroupLabels` 搜索；没有配置文件时也可直接输入 `user@host:port`
 - **交互式主机密钥验证**：可视化界面接受或拒绝未知主机密钥
-- **密码认证**：通过 TUI 交互式输入密码，支持键盘交互式认证
+- **完整认证流程**：支持 SSH agent、未加密/加密私钥、密码和 keyboard-interactive
 - **连接健康检测**：SSH/TCP 双重保活，连接断开自动提示重连
 - **远程隧道 LAN 目标**：本地目标和远程监听均支持 `ip:port` 格式
-- **内置 SFTP 管理器**：本地/远程双面板浏览，支持文件同步、目录同步、重命名、预览和传输结果确认
+- **安全 SFTP 管理器**：响应式本地/远程浏览、原子覆盖、单次目录扫描计划、跳过非普通文件、取消操作和所有方向的覆盖确认
 - **键盘驱动界面**：快捷键操作，高效导航
 
 ## 安装
@@ -59,7 +59,7 @@ make install    # 构建并复制到 /usr/local/bin/
 ### 创建隧道
 
 1. 按 `c` 创建新隧道
-2. 从 `~/.ssh/config` 列表中选择主机
+2. 从 `~/.ssh/config` 中选择或搜索主机，也可按 `m` 直接输入 `user@host:port`
 3. 选择隧道类型：
    - **本地 TCP**：将本地 TCP 端口转发至远程服务
    - **本地 UDP**：通过 SSH 将本地 UDP 数据报中继至远程 UDP 服务
@@ -100,6 +100,15 @@ UDP 转发使用带长度边界的数据报协议封装在 SSH session 中，远
 | `↑↓` | 导航选择 |
 | `e` | 退出 |
 
+主机选择界面：
+
+| 按键 | 操作 |
+|------|------|
+| `/` | 按别名、主机、用户或标签过滤 |
+| `m` | 手动输入 SSH 主机 |
+| `↑↓` / `PgUp` / `PgDn` | 导航匹配项 |
+| `Enter` | 选择 |
+
 SFTP 界面：
 
 | 按键 | 操作 |
@@ -116,8 +125,8 @@ SFTP 界面：
 
 ## 系统要求
 
-- Go 1.21+（构建时）
-- SSH 私钥：`~/.ssh/id_rsa`、`id_ed25519` 或 `id_ecdsa`，或使用密码认证
+- Go 1.25+（Charm v2 依赖要求）
+- SSH agent、SSH 私钥或密码认证
 - SSH 配置文件：`~/.ssh/config`（可选，用于主机发现）
 - 远端 SSH 服务启用 SFTP 子系统（仅使用 SFTP 管理器时需要）
 - 远端 `PATH` 中存在兼容版本的 `intun`（使用 UDP 转发时需要）
@@ -129,7 +138,7 @@ intun 自动读取 `~/.ssh/config`：
 ```ssh
 Host myserver
     Hostname example.com
-    User root
+    User user
     Port 2222
     IdentityFile ~/.ssh/custom_key
     #!! GroupLabels production web
@@ -141,19 +150,23 @@ Host myserver
 - `User` - 用户名
 - `Port` - 端口（默认 22）
 - `IdentityFile` - 私钥路径
+- `IdentityAgent` / `IdentitiesOnly` - SSH agent 与身份选择策略
+- `ProxyJump` - 一个或多个逗号分隔的跳板主机
+- `Include` 与通配符 `Host` 默认配置
 - `#!! GroupLabels` - 标签（以金色高亮显示）
 
 ## 技术架构
 
-- **UI 框架**: [bubbletea](https://github.com/charmbracelet/bubbletea) (Charm TUI)
+- **UI 框架**: Bubble Tea v2 与 Bubbles v2 状态组件
 - **SSH 库**: [golang.org/x/crypto/ssh](https://pkg.go.dev/golang.org/x/crypto/ssh)
 - **SFTP 库**: [github.com/pkg/sftp](https://github.com/pkg/sftp)
-- **样式渲染**: [lipgloss](https://github.com/charmbracelet/lipgloss)
+- **样式渲染**: Lip Gloss v2，自适应宽屏/紧凑布局
 - **转发模型**: 每条隧道持有一个方向/协议规格，再分派给相互独立的 TCP 或 UDP 实现
 - **UDP 中继**: 通过 SSH session 传输带版本和长度边界的 UDP 帧，支持客户端 association 映射与空闲回收
 - **UDP 角色**: `PeerRelay` 负责监听端口和客户端 association，`TargetRelay` 为每个 association 管理独立的目标 socket；本地与远程模式会交换两种角色所在的位置
 - **统计监控**: 1秒间隔采样，5秒间隔 SSH 探测，TX/RX 总量 + ↑↓ 速率指示
-- **TUI 安全性**: 共享 modal 弹窗、SFTP 传输结果确认、可取消的 SFTP 操作、串行化 SFTP 客户端访问
+- **TUI 架构**: 领域状态分组、类型化异步命令、过期结果 ID、viewport 隧道列表和需确认的结果弹窗
+- **SFTP 安全性**: 临时文件原子替换、按目标路径授权覆盖、禁止覆盖式重命名、不可变递归同步计划和基于 context 的取消
 
 ## 开发
 
@@ -163,6 +176,9 @@ make build
 
 # 运行测试
 make test
+
+# 完整门禁：格式、Vet、Staticcheck、竞态测试、75% 覆盖率、漏洞与完整历史机密扫描
+make check
 
 # 注入版本号
 VERSION=$(git describe --tags)
@@ -178,7 +194,7 @@ make all    # 全平台编译
 
 ### 调试
 
-设置 `INTUN_LOG` 环境变量启用 SSH 连接诊断日志：
+设置 `INTUN_LOG` 启用诊断日志。日志权限固定为 `0600`，达到 5 MiB 时轮转并保留一份备份：
 
 ```bash
 INTUN_LOG=/tmp/intun.log ./intun

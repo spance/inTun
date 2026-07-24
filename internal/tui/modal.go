@@ -38,10 +38,6 @@ type ModalSpec struct {
 	Width    int
 }
 
-func (m ModalView) String() string {
-	return m.content
-}
-
 func overlayCentered(base string, modal ModalView, width, height int) string {
 	if modal.content == "" {
 		return base
@@ -109,7 +105,7 @@ func renderModal(screenWidth int, body string, modalWidth int) ModalView {
 
 func renderModalSpec(width int, spec ModalSpec) ModalView {
 	var b strings.Builder
-	b.WriteString(modalTitleStyle(spec.Severity).Render(spec.Title))
+	b.WriteString(modalTitleStyle(spec.Severity).Render(safeInline(spec.Title)))
 	b.WriteString("\n")
 
 	if len(spec.Body) > 0 || len(spec.Fields) > 0 {
@@ -120,12 +116,12 @@ func renderModalSpec(width int, spec ModalSpec) ModalView {
 			b.WriteString("\n")
 			continue
 		}
-		b.WriteString(selectedStyle.Render(line))
+		b.WriteString(selectedStyle.Render(safeInline(line)))
 		b.WriteString("\n")
 	}
 	for _, field := range spec.Fields {
-		b.WriteString(accentStyle.Bold(true).Render(field.Label + ": "))
-		b.WriteString(field.Value)
+		b.WriteString(accentStyle.Bold(true).Render(safeInline(field.Label) + ": "))
+		b.WriteString(safeInline(field.Value))
 		b.WriteString("\n")
 	}
 	if len(spec.Actions) > 0 {
@@ -163,7 +159,7 @@ func modalTitleStyle(severity ModalSeverity) lipgloss.Style {
 func renderModalActions(actions []ModalAction) string {
 	parts := make([]string, 0, len(actions))
 	for _, action := range actions {
-		parts = append(parts, "["+action.Key+"] "+action.Label)
+		parts = append(parts, "["+safeInline(action.Key)+"] "+safeInline(action.Label))
 	}
 	return strings.Join(parts, "    ")
 }

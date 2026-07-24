@@ -104,12 +104,6 @@ func (r *AssociationRegistry) ExpireBefore(cutoff time.Time) []uint32 {
 	return expired
 }
 
-func (r *AssociationRegistry) Len() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.byID)
-}
-
 func (r *AssociationRegistry) allocateID() uint32 {
 	for {
 		id := r.nextID

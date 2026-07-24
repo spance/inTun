@@ -19,6 +19,7 @@ const (
 	sftpMinListRows         = 5
 	sftpRenameDrawerRows    = 3
 	sftpTransferDrawerRows  = 4
+	sftpLoadingDrawerRows   = 3
 	sftpPreviewFrameRows    = 3
 )
 
@@ -93,6 +94,9 @@ func (m Model) sftpDrawerHeight() int {
 	}
 	if m.sftpTransferring {
 		height += sftpTransferDrawerRows
+	}
+	if m.sftpLoading {
+		height += sftpLoadingDrawerRows
 	}
 	if m.sftpPreviewing {
 		height += m.sftpPreviewHeight() + sftpPreviewFrameRows

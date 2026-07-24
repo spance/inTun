@@ -17,9 +17,18 @@ func (m Model) renderSFTPScreen() string {
 
 	var b strings.Builder
 	panelHeight := m.sftpPanelHeight()
-	localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, panelHeight, m.sftpFocus == 0)
-	remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, panelHeight, m.sftpFocus == 1)
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, localPanel, " ", remotePanel))
+	if width < 90 {
+		panelWidth = max(20, width-2)
+		if m.sftpFocus == 0 {
+			b.WriteString(m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, panelHeight, true))
+		} else {
+			b.WriteString(m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, panelHeight, true))
+		}
+	} else {
+		localPanel := m.renderSFTPPanel("LOCAL", m.sftpLocalDir, m.sftpLocalFiles, 0, panelWidth, panelHeight, m.sftpFocus == 0)
+		remotePanel := m.renderSFTPPanel("REMOTE", m.sftpRemoteDir, m.sftpRemoteFiles, 1, panelWidth, panelHeight, m.sftpFocus == 1)
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, localPanel, " ", remotePanel))
+	}
 	b.WriteString("\n")
 	b.WriteString(m.renderSFTPSelectedDetail(width - 2))
 	b.WriteString("\n")
@@ -35,6 +44,11 @@ func (m Model) renderSFTPScreen() string {
 
 	if m.sftpTransferring {
 		b.WriteString(panelStyle(width-2, 0, false).Render(m.renderSFTPProgress(width - 6)))
+		b.WriteString("\n")
+	}
+
+	if m.sftpLoading {
+		b.WriteString(panelStyle(width-2, 0, false).Render(m.spinner.View() + " " + accentStyle.Render(m.sftpLoadingLabel+"...")))
 		b.WriteString("\n")
 	}
 
@@ -168,7 +182,7 @@ func (m Model) renderSFTPPreview(width, maxLines int) string {
 	b.WriteString(accentStyle.Bold(true).Render("Preview"))
 	b.WriteString("\n")
 
-	lines := strings.Split(m.sftpPreview, "\n")
+	lines := strings.Split(safeMultiline(m.sftpPreview), "\n")
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
 	}

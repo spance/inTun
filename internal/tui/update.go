@@ -1,10 +1,10 @@
 package tui
 
 import (
-	"fmt"
 	"os"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
 )
@@ -22,6 +22,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m = m.resizeComponents(msg.Width, msg.Height)
 		if m.screen == ScreenSFTP {
 			m = m.normalizeSFTPScroll()
 		}
@@ -30,6 +31,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.width != m.width || msg.height != m.height {
 			m.width = msg.width
 			m.height = msg.height
+			m = m.resizeComponents(msg.width, msg.height)
 			if m.screen == ScreenSFTP {
 				m = m.normalizeSFTPScroll()
 			}
@@ -37,6 +39,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	case tickMsg:
 		m.sampleTunnelTraffic()
 		if !m.statusConfirm && m.statusTicks > 0 {
@@ -45,40 +51,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = ""
 			}
 		}
-		if m.sftpDone != nil {
-			if m.sftpTransferring && m.sftpProgress != nil {
-				snapshot := m.sftpProgress.Snapshot()
-				m.sftpProgress.SetSpeed((snapshot.Done - m.sftpPrevDone) * 2)
-				m.sftpPrevDone = snapshot.Done
-			}
-			select {
-			case result := <-m.sftpDone:
-				if result.id != m.sftpTransferID {
-					m.sftpDone = nil
-				} else {
-					m.sftpTransferring = false
-					m.sftpCancel = nil
-					if m.sftpProgress != nil {
-						m.sftpProgress.SetActive(false)
-					}
-					if m.screen == ScreenSFTP {
-						if result.err != nil {
-							m.setStatusConfirm(formatSFTPTransferError(result))
-						} else {
-							m.setStatusConfirm(formatSFTPTransferSuccess(result))
-						}
-					}
-					if result.err == nil && m.screen == ScreenSFTP && m.sftpClient != nil {
-						var refreshErr error
-						m, refreshErr = m.refreshSFTPFiles()
-						if refreshErr != nil {
-							m.setStatusConfirm(fmt.Sprintf("Transfer finished, but refresh failed: %v", refreshErr))
-						}
-					}
-					m.sftpDone = nil
-				}
-			default:
-			}
+		if m.sftpTransferring && m.sftpProgress != nil {
+			snapshot := m.sftpProgress.Snapshot()
+			m.sftpProgress.SetSpeed((snapshot.Done - m.sftpPrevDone) * 2)
+			m.sftpPrevDone = snapshot.Done
 		}
 		return m, tea.Batch(
 			tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
@@ -93,6 +69,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.promptInput = ""
 		}
 		return m, nil
+	case sftpOpenResultMsg:
+		return m.handleSFTPOpenResult(msg)
+	case sftpNavigateResultMsg:
+		return m.handleSFTPNavigateResult(msg), nil
+	case sftpPreviewResultMsg:
+		return m.handleSFTPPreviewResult(msg), nil
+	case sftpRenameResultMsg:
+		return m.handleSFTPRenameResult(msg)
+	case sftpRefreshResultMsg:
+		return m.handleSFTPRefreshResult(msg), nil
+	case sftpSinglePreflightResultMsg:
+		return m.handleSFTPSinglePreflightResult(msg)
+	case sftpPlanResultMsg:
+		return m.handleSFTPPlanResult(msg), nil
+	case sftpTransferResult:
+		return m.handleSFTPTransferResult(msg)
 	}
 
 	return m, nil

@@ -14,6 +14,7 @@ import (
 	"github.com/spance/intun/internal/config"
 	"github.com/spance/intun/internal/platform"
 	"github.com/spance/intun/internal/sftp"
+	"github.com/spance/intun/internal/testutil"
 	"github.com/spance/intun/internal/tunnel"
 )
 
@@ -58,8 +59,19 @@ func updateModel(m Model, msg tea.Msg) Model {
 	return result.(Model)
 }
 
+func runCommandChain(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	for cmd != nil {
+		msg := cmd()
+		result, next := m.Update(msg)
+		m = result.(Model)
+		cmd = next
+	}
+	return m
+}
+
 func newTestModel(hosts []config.Host) Model {
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m := tunnel.NewManager(nil)
 	m.SetExecutor(mockExec)
 	return NewModel(hosts, m, "v1.0.0-test")
@@ -227,9 +239,9 @@ func TestModelPortInputPasteAddress(t *testing.T) {
 	}
 
 	m = updateModel(m, keyEnter())
-	m = updateModel(m, keyMsg("10.0.0.15:5551"))
-	if m.portInput != "10.0.0.15:5551" {
-		t.Fatalf("remote target paste portInput = %q, want %q", m.portInput, "10.0.0.15:5551")
+	m = updateModel(m, keyMsg("192.0.2.15:5551"))
+	if m.portInput != "192.0.2.15:5551" {
+		t.Fatalf("remote target paste portInput = %q, want %q", m.portInput, "192.0.2.15:5551")
 	}
 }
 
@@ -272,30 +284,6 @@ func TestModelRejectsEmptyPortInput(t *testing.T) {
 	}
 	if got := len(m.manager.List()); got != 0 {
 		t.Fatalf("tunnel count = %d, want 0", got)
-	}
-}
-
-func TestValidPortInput(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     string
-		allowAddr bool
-		want      bool
-	}{
-		{name: "plain port", input: "5555", allowAddr: true, want: true},
-		{name: "host port", input: "10.0.0.15:5551", allowAddr: true, want: true},
-		{name: "empty", input: "", allowAddr: true, want: false},
-		{name: "missing port", input: "127.0.0.1:", allowAddr: true, want: false},
-		{name: "out of range", input: "70000", allowAddr: true, want: false},
-		{name: "dynamic rejects host", input: "127.0.0.1:1080", allowAddr: false, want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := validPortInput(tt.input, tt.allowAddr); got != tt.want {
-				t.Fatalf("validPortInput(%q, %v) = %v, want %v", tt.input, tt.allowAddr, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -467,7 +455,7 @@ func TestModelQuitConfirmsWithLiveTunnel(t *testing.T) {
 		t.Fatal("confirmQuit should be false after Esc")
 	}
 
-	result, cmd = m.Update(keyMsg("q"))
+	result, _ = m.Update(keyMsg("q"))
 	m = result.(Model)
 	if !m.confirmQuit {
 		t.Fatal("confirmQuit should reopen on q")
@@ -485,7 +473,7 @@ func TestModelQuitDoesNotConfirmStoppedTunnel(t *testing.T) {
 
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	tun, _ := m.manager.Create("stopped-tunnel", cfg, tunnel.Local, "8080", "80")
-	m.manager.Stop(tun.ID)
+	m.manager.Stop(tun.ID())
 
 	_, cmd := m.Update(keyMsg("q"))
 	if cmd == nil {
@@ -499,7 +487,7 @@ func TestModelNavigateTunnels(t *testing.T) {
 	m.width = 100
 	m.height = 30
 
-	mockExec := platform.NewMockExecutor()
+	mockExec := testutil.NewMockExecutor()
 	m.manager.SetExecutor(mockExec)
 
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
@@ -540,7 +528,7 @@ func TestModelStopStartTunnel(t *testing.T) {
 		t.Errorf("after 's', tunnel status = %v, want %v", tun.GetStatus(), tunnel.StatusStopped)
 	}
 
-	m.manager.Restart(tun.ID)
+	m.manager.Restart(tun.ID())
 	m = updateModel(m, keyMsg("s"))
 	if tun.GetStatus() != tunnel.StatusStopped {
 		t.Errorf("'s' on running tunnel should stop it")
@@ -566,14 +554,14 @@ func TestModelDeleteTunnel(t *testing.T) {
 	}
 }
 
-func TestModelNoHostsError(t *testing.T) {
+func TestModelNoHostsOpensManualConnection(t *testing.T) {
 	m := newTestModel([]config.Host{})
 	m.width = 100
 	m.height = 30
 
 	m = updateModel(m, keyMsg("c"))
-	if m.err == nil {
-		t.Error("'c' with no hosts should set error")
+	if m.err != nil || m.screen != ScreenInputHost || !m.manualHostInput.Focused() {
+		t.Fatalf("'c' with no hosts should open manual input, screen=%v err=%v focused=%v", m.screen, m.err, m.manualHostInput.Focused())
 	}
 }
 
@@ -857,16 +845,11 @@ func TestSFTPTransferErrorSetsStatus(t *testing.T) {
 	m.screen = ScreenSFTP
 	m.sftpTransferring = true
 	m.sftpProgress = sftp.NewProgressInfo("file.txt", 100)
-	m.sftpDone = make(chan sftpTransferResult, 1)
-	m.sftpDone <- sftpTransferResult{err: fmt.Errorf("permission denied")}
 
-	m = updateModel(m, tickMsg{})
+	m = updateModel(m, sftpTransferResult{err: fmt.Errorf("permission denied")})
 
 	if m.sftpTransferring {
 		t.Fatal("transfer should be marked complete after result")
-	}
-	if m.sftpDone != nil {
-		t.Fatal("sftpDone should be cleared after result")
 	}
 	if m.statusMsg == "" || !strings.Contains(m.statusMsg, "permission denied") {
 		t.Fatalf("statusMsg = %q, want transfer error", m.statusMsg)
@@ -921,19 +904,14 @@ func TestStaleSFTPTransferResultIsIgnored(t *testing.T) {
 	m.sftpTransferID = 2
 	m.sftpTransferring = true
 	m.sftpProgress = sftp.NewProgressInfo("file.txt", 100)
-	m.sftpDone = make(chan sftpTransferResult, 1)
-	m.sftpDone <- sftpTransferResult{id: 1, err: fmt.Errorf("old failure"), direction: "upload"}
 
-	m = updateModel(m, tickMsg{})
+	m = updateModel(m, sftpTransferResult{id: 1, err: fmt.Errorf("old failure"), direction: "upload"})
 
 	if !m.sftpTransferring {
 		t.Fatal("stale transfer result should not stop the current transfer")
 	}
 	if m.statusMsg != "" {
 		t.Fatalf("stale transfer result set statusMsg = %q", m.statusMsg)
-	}
-	if m.sftpDone != nil {
-		t.Fatal("stale done channel should be cleared")
 	}
 }
 
@@ -1032,12 +1010,10 @@ func TestValidateSingleSyncSourceRejectsLocalSymlink(t *testing.T) {
 		name:   "link.txt",
 		size:   1,
 	}
-	got, ok := m.validateSingleSyncSource(pending)
-	if ok {
-		t.Fatal("local symlink should not be accepted for single-file sync")
-	}
-	if !strings.Contains(got.statusMsg, "symbolic link") {
-		t.Fatalf("statusMsg = %q, want symbolic link skip reason", got.statusMsg)
+	updated, cmd := m.preflightSingleSync(pending)
+	m = runCommandChain(t, updated, cmd)
+	if !strings.Contains(m.statusMsg, "symbolic link") {
+		t.Fatalf("statusMsg = %q, want symbolic link skip reason", m.statusMsg)
 	}
 }
 
@@ -1079,8 +1055,9 @@ func TestSFTPEnterDirNavigatesLocalDirectories(t *testing.T) {
 	m.sftpLocalFiles = []sftp.FileEntry{{Name: "child", IsDir: true}}
 	m.sftpCursor[0] = 1
 
-	updated, _ := m.sftpEnterDir()
+	updated, cmd := m.sftpEnterDir()
 	m = updated.(Model)
+	m = runCommandChain(t, m, cmd)
 
 	if m.sftpLocalDir != childDir {
 		t.Fatalf("sftpLocalDir = %q, want %q", m.sftpLocalDir, childDir)
@@ -1116,8 +1093,9 @@ func TestSFTPNavigateToCancelledContext(t *testing.T) {
 	cancel()
 	m.cancelCtx = ctx
 
-	updated, _ := m.sftpNavigateTo(t.TempDir())
+	updated, cmd := m.sftpNavigateTo(t.TempDir())
 	m = updated.(Model)
+	m = runCommandChain(t, m, cmd)
 
 	if !strings.Contains(m.statusMsg, "cancelled") {
 		t.Fatalf("statusMsg = %q, want cancelled", m.statusMsg)
@@ -1282,33 +1260,16 @@ func TestValidateSingleSyncSourceRejectsLocalDirectoryAndMissing(t *testing.T) {
 	}
 
 	m := newTestModel(nil)
-	updated, ok := m.validateSingleSyncSource(sftpPendingSync{focus: 0, source: filepath.Join(tmpDir, "missing")})
-	m = updated
-	if ok || !strings.Contains(m.statusMsg, "Source no longer exists") {
-		t.Fatalf("missing source ok=%v status=%q, want rejection", ok, m.statusMsg)
+	updated, cmd := m.preflightSingleSync(sftpPendingSync{focus: 0, source: filepath.Join(tmpDir, "missing")})
+	m = runCommandChain(t, updated, cmd)
+	if !strings.Contains(m.statusMsg, "Source no longer exists") {
+		t.Fatalf("missing source status=%q, want rejection", m.statusMsg)
 	}
 
-	updated, ok = m.validateSingleSyncSource(sftpPendingSync{focus: 0, source: childDir})
-	m = updated
-	if ok || !strings.Contains(m.statusMsg, "Skipped non-regular file: directory") {
-		t.Fatalf("directory source ok=%v status=%q, want non-regular rejection", ok, m.statusMsg)
-	}
-}
-
-func TestSingleSyncOverwriteReportDetectsLocalTarget(t *testing.T) {
-	tmpDir := t.TempDir()
-	target := filepath.Join(tmpDir, "existing.txt")
-	if err := os.WriteFile(target, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := newTestModel(nil)
-	report, err := m.singleSyncOverwriteReport(sftpPendingSync{focus: 1, target: target})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.Count != 1 || report.Items[0].Kind != "file" {
-		t.Fatalf("overwrite report = %#v, want one file", report)
+	updated, cmd = m.preflightSingleSync(sftpPendingSync{focus: 0, source: childDir})
+	m = runCommandChain(t, updated, cmd)
+	if !strings.Contains(m.statusMsg, "Skipped non-regular file: directory") {
+		t.Fatalf("directory source status=%q, want non-regular rejection", m.statusMsg)
 	}
 }
 
@@ -1402,15 +1363,17 @@ func TestSFTPPreviewLocalTextAndBinary(t *testing.T) {
 	m.sftpLocalFiles = []sftp.FileEntry{{Name: "text.txt"}, {Name: "binary.bin"}}
 	m.sftpCursor[0] = 1
 
-	updated, _ := m.sftpPreviewFile()
+	updated, cmd := m.sftpPreviewFile()
 	m = updated.(Model)
+	m = runCommandChain(t, m, cmd)
 	if !m.sftpPreviewing || m.sftpPreview != "hello" {
 		t.Fatalf("text preview = %q previewing=%v, want hello true", m.sftpPreview, m.sftpPreviewing)
 	}
 
 	m.sftpCursor[0] = 2
-	updated, _ = m.sftpPreviewFile()
+	updated, cmd = m.sftpPreviewFile()
 	m = updated.(Model)
+	m = runCommandChain(t, m, cmd)
 	if m.sftpPreview != "[binary file]" {
 		t.Fatalf("binary preview = %q, want binary marker", m.sftpPreview)
 	}
@@ -1453,8 +1416,9 @@ func TestSFTPConfirmRenameLocalSuccess(t *testing.T) {
 	m.sftpRenaming = true
 	m.sftpRenameInput = "new.txt"
 
-	updated, _ := m.sftpConfirmRename()
+	updated, cmd := m.sftpConfirmRename()
 	m = updated.(Model)
+	m = runCommandChain(t, m, cmd)
 
 	if _, err := os.Stat(filepath.Join(tmpDir, "new.txt")); err != nil {
 		t.Fatalf("renamed file missing: %v", err)
@@ -1512,21 +1476,6 @@ func TestSFTPPanelHeightMatchesVisibleRows(t *testing.T) {
 	m.sftpTransferring = true
 	if got, want := m.sftpPanelHeight()-sftpPanelRowsAroundList, m.sftpListVisibleItems(); got != want {
 		t.Fatalf("panel list rows with drawer = %d, want %d", got, want)
-	}
-}
-
-func TestRefreshSFTPFilesReportsLocalError(t *testing.T) {
-	m := newTestModel(nil)
-	m.screen = ScreenSFTP
-	m.sftpLocalDir = filepath.Join(t.TempDir(), "missing")
-	m.sftpRemoteDir = "/"
-
-	_, err := m.refreshSFTPFiles()
-	if err == nil {
-		t.Fatal("refreshSFTPFiles should report refresh failures")
-	}
-	if !strings.Contains(err.Error(), "local:") {
-		t.Fatalf("refresh error = %v, want local context", err)
 	}
 }
 
@@ -1592,7 +1541,6 @@ func TestSFTPExitDuringTransferCancelsAndLeavesSFTP(t *testing.T) {
 	m.sftpTransferring = true
 	cancelled := false
 	m.sftpCancel = func() { cancelled = true }
-	m.sftpDone = make(chan sftpTransferResult, 1)
 
 	m = updateModel(m, keyMsg("q"))
 
@@ -1601,9 +1549,6 @@ func TestSFTPExitDuringTransferCancelsAndLeavesSFTP(t *testing.T) {
 	}
 	if m.sftpTransferring {
 		t.Fatal("exit should clear transferring state after synchronous cancellation")
-	}
-	if m.sftpDone != nil {
-		t.Fatal("exit should detach the active transfer result channel")
 	}
 	if m.screen != ScreenMain {
 		t.Fatal("exit should return to main screen")
@@ -1618,17 +1563,13 @@ func TestStaleSFTPTransferResultKeepsTickAlive(t *testing.T) {
 	m.sftpTransferID = 2
 	m.sftpTransferring = true
 	m.sftpProgress = sftp.NewProgressInfo("file.txt", 1)
-	m.sftpDone = make(chan sftpTransferResult, 1)
-	m.sftpDone <- sftpTransferResult{id: 1, err: context.Canceled, direction: "download"}
 
+	m = updateModel(m, sftpTransferResult{id: 1, err: context.Canceled, direction: "download"})
 	updated, cmd := m.Update(tickMsg{})
 	m = updated.(Model)
 
 	if !m.sftpTransferring {
 		t.Fatal("stale transfer result should not stop the current transfer")
-	}
-	if m.sftpDone != nil {
-		t.Fatal("stale transfer result should clear old done channel")
 	}
 	if m.statusMsg != "" {
 		t.Fatal("tick should continue processing status countdown after stale result")
@@ -1640,6 +1581,12 @@ func TestStaleSFTPTransferResultKeepsTickAlive(t *testing.T) {
 
 func TestSampleTunnelTrafficCapsHistoryAndDropsStaleIDs(t *testing.T) {
 	m := newTestModel(nil)
+	conn := testutil.NewMockConnection()
+	exec := testutil.NewMockExecutor()
+	exec.ConnectFn = func(cfg *platform.SSHConfig, spec platform.ForwardSpec) (*testutil.MockConnection, error) {
+		return conn, nil
+	}
+	m.manager.SetExecutor(exec)
 	cfg := &platform.SSHConfig{Host: "example.com", Port: "22", User: "user"}
 	tun, err := m.manager.Create("flow", cfg, tunnel.Local, "8080", "80")
 	if err != nil {
@@ -1647,15 +1594,18 @@ func TestSampleTunnelTrafficCapsHistoryAndDropsStaleIDs(t *testing.T) {
 	}
 	m.trafficHist = map[int][]int64{999: []int64{1, 2, 3}}
 
-	for i := 0; i < 125; i++ {
-		tun.UpdateStats(0, 0, int64(i), int64(i), 0, true)
+	var total int64
+	for i := int64(0); i < 125; i++ {
+		total += i
+		conn.SetStats(total, total)
+		m.manager.Refresh(false, time.Second)
 		m.sampleTunnelTraffic()
 	}
 
 	if _, ok := m.trafficHist[999]; ok {
 		t.Fatal("traffic history should drop stale tunnel IDs")
 	}
-	history := m.trafficHist[tun.ID]
+	history := m.trafficHist[tun.ID()]
 	if len(history) != 120 {
 		t.Fatalf("history length = %d, want 120", len(history))
 	}
@@ -1671,23 +1621,6 @@ func TestRenderTrafficFlowUsesFixedWidthAndNoLabel(t *testing.T) {
 	}
 	if got := len([]rune(rendered)); got != 20 {
 		t.Fatalf("rendered flow width = %d, want minimum 20: %q", got, rendered)
-	}
-}
-
-func TestTableLayoutAndStatusStyles(t *testing.T) {
-	narrow := newTableLayout(60)
-	wide := newTableLayout(200)
-	if narrow.nameW < 10 || narrow.addrW < 8 {
-		t.Fatalf("narrow layout has invalid widths: %#v", narrow)
-	}
-	if wide.nameW <= narrow.nameW {
-		t.Fatalf("wide layout should allocate more name width: narrow=%#v wide=%#v", narrow, wide)
-	}
-
-	for _, status := range []string{"Running", "Connecting", "Error", "Stopped", "Other"} {
-		if got := statusTextStyle(status).Render(status); stripANSI(got) != status {
-			t.Fatalf("statusTextStyle(%q) rendered %q", status, got)
-		}
 	}
 }
 

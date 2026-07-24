@@ -62,8 +62,17 @@ func (s ForwardSpec) Validate() error {
 	if s.LocalAddr == "" {
 		return fmt.Errorf("local address is required")
 	}
+	addressOptions := ForwardAddressOptions{AllowHost: true, AllowZeroPort: true}
+	if _, err := ParseForwardAddress(s.LocalAddr, addressOptions); err != nil {
+		return fmt.Errorf("invalid local address: %w", err)
+	}
 	if s.Type != Dynamic && s.RemoteAddr == "" {
 		return fmt.Errorf("remote address is required")
+	}
+	if s.Type != Dynamic {
+		if _, err := ParseForwardAddress(s.RemoteAddr, addressOptions); err != nil {
+			return fmt.Errorf("invalid remote address: %w", err)
+		}
 	}
 	if s.Protocol == UDP && s.Type == Dynamic {
 		return fmt.Errorf("%s UDP forwarding is not supported", s.Type)
@@ -76,6 +85,7 @@ type AuthRequestType int
 const (
 	AuthRequestHostKey AuthRequestType = iota
 	AuthRequestPassword
+	AuthRequestPassphrase
 )
 
 type AuthRequest struct {
@@ -93,16 +103,29 @@ type AuthResponse struct {
 }
 
 type AuthContext struct {
-	RequestChan chan<- AuthRequest
-	Cancel      context.Context
-	Timeout     time.Duration
+	RequestChan    chan<- AuthRequest
+	Cancel         context.Context
+	CancelRequests func(int)
+	TunnelID       int
+	Timeout        time.Duration
+}
+
+func (c *AuthContext) cancellationContext() context.Context {
+	if c != nil && c.Cancel != nil {
+		return c.Cancel
+	}
+	return context.Background()
 }
 
 type SSHConfig struct {
-	Host         string
-	Port         string
-	User         string
-	IdentityFile string
+	Host           string
+	Port           string
+	User           string
+	IdentityFile   string
+	IdentityFiles  []string
+	IdentityAgent  string
+	IdentitiesOnly bool
+	ProxyJumps     []SSHConfig
 }
 
 type Connection interface {

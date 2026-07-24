@@ -23,16 +23,8 @@ var (
 			Bold(true).
 			Padding(0, 1)
 
-	statusStyle = lipgloss.NewStyle().
-			Foreground(colorSuccess)
-
 	errorStyle = lipgloss.NewStyle().
 			Foreground(colorDanger)
-
-	borderStyle = lipgloss.NewStyle().
-			Border(uiBorder()).
-			BorderForeground(colorMuted).
-			Padding(0, 1)
 
 	headerStyle = lipgloss.NewStyle().
 			Foreground(colorMuted).
@@ -42,42 +34,8 @@ var (
 			Foreground(colorSelected).
 			Bold(true)
 
-	runningBadgeStyle = lipgloss.NewStyle().
-				Foreground(colorPanel).
-				Background(colorSuccess).
-				Bold(true).
-				Padding(0, 1)
-
-	stoppedBadgeStyle = lipgloss.NewStyle().
-				Foreground(colorSelected).
-				Background(colorMuted).
-				Padding(0, 1)
-
-	errorBadgeStyle = lipgloss.NewStyle().
-			Foreground(colorSelected).
-			Background(colorDanger).
-			Bold(true).
-			Padding(0, 1)
-
-	connectingBadgeStyle = lipgloss.NewStyle().
-				Foreground(colorPanel).
-				Background(colorWarning).
-				Padding(0, 1)
-
-	labelHighlightStyle = lipgloss.NewStyle().
-				Foreground(colorWarning).
-				Bold(true)
-
-	labelSelectedStyle = lipgloss.NewStyle().
-				Foreground(colorWarning).
-				Bold(true)
-
 	shortcutStyle = lipgloss.NewStyle().
 			Foreground(colorText)
-
-	keyStyle = lipgloss.NewStyle().
-			Foreground(colorWarning).
-			Bold(true)
 
 	lineStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
@@ -112,37 +70,6 @@ var (
 			Foreground(colorMuted).
 			Bold(true)
 
-	statCardStyle = lipgloss.NewStyle().
-			Border(uiBorder()).
-			BorderForeground(colorMuted).
-			Padding(0, 2).
-			MarginRight(1).
-			Width(18)
-
-	borderAccentStyle = lipgloss.NewStyle().
-				Foreground(colorMuted).
-				BorderForegroundBlend(colorAccent, colorAccent2)
-
-	tableHeaderStyle = lipgloss.NewStyle().
-				Foreground(colorMuted).
-				Bold(true).
-				Padding(0, 1)
-
-	tableSelectedStyle = lipgloss.NewStyle().
-				Foreground(colorSelected).
-				Background(colorPanelHi).
-				Bold(true).
-				Padding(0, 1)
-
-	tableEvenStyle = lipgloss.NewStyle().
-			Foreground(colorText).
-			Padding(0, 1)
-
-	tableOddStyle = lipgloss.NewStyle().
-			Foreground(colorText).
-			Background(colorSurface).
-			Padding(0, 1)
-
 	listItemStyle = lipgloss.NewStyle().
 			Foreground(colorText).
 			Padding(0, 1).
@@ -159,16 +86,6 @@ var (
 			Background(colorSurface).
 			Foreground(colorText).
 			Padding(0, 1)
-
-	commandKeyStyle = lipgloss.NewStyle().
-			Background(colorAccent).
-			Foreground(colorPanel).
-			Bold(true).
-			Padding(0, 1)
-
-	commandTextStyle = lipgloss.NewStyle().
-				Foreground(colorText).
-				PaddingRight(1)
 
 	labelPillStyle = lipgloss.NewStyle().
 			Foreground(colorPanel).
@@ -195,19 +112,4 @@ func panelStyle(width, height int, focused bool) lipgloss.Style {
 		style = style.BorderForeground(colorAccent)
 	}
 	return style
-}
-
-func statusTextStyle(status string) lipgloss.Style {
-	switch status {
-	case "Running":
-		return successStyle
-	case "Connecting":
-		return warningStyle
-	case "Error":
-		return dangerStyle
-	case "Stopped":
-		return mutedStyle
-	default:
-		return shortcutStyle
-	}
 }
